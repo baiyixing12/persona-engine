@@ -1,7 +1,7 @@
 {
   "display_name": "人格引擎",
   "loading_order": 90,
-  "requires": ["JS-Slash-Runner"],
+  "dependencies": ["JS-Slash-Runner"],
   "optional": [],
   "js": "dist/index.js",
   "hooks": {
