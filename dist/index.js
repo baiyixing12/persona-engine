@@ -1,5 +1,5 @@
 // src/defaults.js
-var ENGINE_VERSION = "0.2.0";
+var ENGINE_VERSION = "0.2.1";
 var DEFAULT_EVENTS = [
   // 注意：`抱` 必须排除「抱歉」，否则任何道歉都会被误判成亲密（中文子串陷阱）。
   { id: "intimate", pattern: "\u62E5\u62B1|(?:\u62B1)(?!\u6B49)|\u7275\u624B|\u9760\u7740|\u8D34\u8FD1|\u4F9D\u504E", z: 0.75, effect: { valence: 0.35, arousal: 0.15 } },
