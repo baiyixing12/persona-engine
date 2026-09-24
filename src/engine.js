@@ -590,13 +590,65 @@ export class PersonaEngine {
     return L.join('\n');
   }
 
+  /**
+   * 人设护栏（事前约束）。
+   *
+   * 与 fullState() 的分工：
+   *   fullState() —— 描述「此刻我正处于什么状态」，供模型参考语气；
+   *   guard()     —— 规定「无论什么状态、你都不许违反什么」，供模型遵守。
+   * 后者在正文生成之前注入，用来防止模型顺着剧情把人设写崩。
+   *
+   * 返回空串表示不加护栏（未启用 / 没有任何内容）。
+   * 条件式纠偏复用 mood.rules 同一套 evalCmp 求值器，维度键沿用 af 短键。
+   */
+  guard() {
+    const G = this.profile.persona_guard;
+    if (!G || G.enabled !== true) return '';
+    const L = [];
+    const tctx = this.tctx;
+    const list = (arr, bullet, inline) =>
+      (Array.isArray(arr) ? arr : [])
+        .map((x) => (typeof x === 'string' ? x.trim() : ''))
+        .filter(Boolean)
+        .map((x) => tpl(x, tctx))
+        .map((x) => (bullet == null ? x : bullet + x));
+    const always = G.always !== false;
+    if (always) {
+      const id = list(G.identity, '- ');
+      if (id.length) L.push('身份（不可改）：\n' + id.join('\n'));
+      const vc = list(G.voice, '- ');
+      if (vc.length) L.push('语气（必须保持）：\n' + vc.join('\n'));
+      const fb = list(G.forbidden, '- ');
+      if (fb.length) L.push('禁止（任何情况都不许）：\n' + fb.join('\n'));
+    }
+    // 状态触发式纠偏：命中即追加
+    const rules = Array.isArray(G.drift_rules) ? G.drift_rules : [];
+    const hit = [];
+    for (const r of rules) {
+      if (!r || typeof r.when !== 'string' || typeof r.then !== 'string') continue;
+      let m = true;
+      try {
+        m = evalCmp({ cmp: r.when }, this.af);
+      } catch (e) {
+        m = false;
+      }
+      if (m) hit.push('- 当' + r.when.replace(/\s+/g, '') + '时：' + tpl(r.then, tctx));
+    }
+    if (hit.length) L.push('此刻的纠正：\n' + hit.join('\n'));
+    if (!L.length) return '';
+    const head = tpl(G.header || '', this.tctx);
+    const tail = tpl(G.footer || '', this.tctx);
+    return head + L.join('\n') + tail;
+  }
   /** 注入正文：头/尾/角色名全部来自 profile.inject */
   inject() {
     const d = this.fullState();
     const I = this.profile.inject || {};
     const head = tpl(I.header || '【内心】以下是{{char}}此刻没有说出口的内心状态，只能用来决定语气、动作与反应；不要直接复述。\n', this.tctx);
     const tail = tpl(I.footer || '', this.tctx);
-    return head + d + tail;
+    // 事前约束排在最前：模型先看到「不许违反什么」，再看到「此刻什么状态」。
+    const g = this.guard();
+    return (g ? g + '\n\n' : '') + head + d + tail;
   }
 }
 

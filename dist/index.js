@@ -1,5 +1,5 @@
 // src/defaults.js
-var ENGINE_VERSION = "0.3.1";
+var ENGINE_VERSION = "0.4.0";
 var DEFAULT_EVENTS = [
   // 注意：`抱` 必须排除「抱歉」，否则任何道歉都会被误判成亲密（中文子串陷阱）。
   { id: "intimate", pattern: "\u62E5\u62B1|(?:\u62B1)(?!\u6B49)|\u7275\u624B|\u9760\u7740|\u8D34\u8FD1|\u4F9D\u504E", z: 0.75, effect: { valence: 0.35, arousal: 0.15 } },
@@ -230,6 +230,34 @@ var DEFAULT_PROFILE = {
        v>=-0.25 不为 cold；s>=0.35 不为 unsafe。 */
     af: { v: 0.15, a: 0.25, s: 0.5, u: 0.35, c: 0.2, ct: 0.3, bc: 0.3 },
     self: { esteem: 0.3, efficacy: 0.3, coherence: 0.5 }
+  },
+  /* ---------- 人设护栏（事前约束） ----------
+   * 与 inject 的区别：inject 说的是「此刻的内心状态」，是事后如实汇报；
+   * persona_guard 说的是「你无论如何都必须守住的东西」，是生成前的硬约束。
+   * 它在正文生成之前注入，用来防止模型为了顺着剧情把人设写崩。
+   *
+   * 结构：
+   *   enabled      -- 总开关
+   *   identity[]   -- 不可改的身份事实（如 '17岁，高二'）
+   *   voice[]      -- 语气契约（如 '句子短'、'不解释自己'）
+   *   forbidden[]  -- 绝对禁止（如 '不把痛苦当筹码'）
+   *   drift_rules[]-- 状态触发式纠偏：{ when:'维度比较式', then:'做法' }
+   *                   when 里的维度名沿用 af 的短键，与 mood.rules 同一套求值器：
+   *                   v 心情 / a 张力 / s 安全感 / u 不确定 / c 连接 / ct 亲近 / bc 边界舒适
+   *                   例：{ when:'s < 0.30', then:'先退半步，不主动贴近' }
+   *   header/footer-- 段落包装文本（{{char}} 会被替换）
+   *   always       -- 是否总是输出 identity/voice/forbidden（drift 命中项另行追加）
+   */
+  persona_guard: {
+    enabled: false,
+    // 默认关：空护栏对任何卡都是噪音，由角色卡自己打开
+    always: true,
+    header: "\u3010\u4EBA\u8BBE\u62A4\u680F\u3011\u4EE5\u4E0B\u662F{{char}}\u5728\u4EFB\u4F55\u60C5\u51B5\u4E0B\u90FD\u4E0D\u80FD\u8FDD\u80CC\u7684\u8BBE\u5B9A\uFF0C\u4F18\u5148\u7EA7\u9AD8\u4E8E\u5267\u60C5\u63A8\u8FDB\u7684\u4FBF\u5229\u3002\n",
+    footer: "\n\uFF08\u82E5\u4E0A\u6587\u4E0E\u6B64\u5904\u51B2\u7A81\uFF0C\u4EE5\u6B64\u5904\u4E3A\u51C6\u3002\uFF09",
+    identity: [],
+    voice: [],
+    forbidden: [],
+    drift_rules: []
   },
   bounds: { low: 0, high: 10, initial: 5 },
   /* ---------- MVU 桥（默认关） ---------- */
@@ -808,13 +836,58 @@ var PersonaEngine = class {
     if (ps) L.push((T.persons || "\u5BF9\u8EAB\u8FB9\u4EBA\u7684\u5224\u65AD\uFF1A") + "\n" + ps);
     return L.join("\n");
   }
+  /**
+   * 人设护栏（事前约束）。
+   *
+   * 与 fullState() 的分工：
+   *   fullState() —— 描述「此刻我正处于什么状态」，供模型参考语气；
+   *   guard()     —— 规定「无论什么状态、你都不许违反什么」，供模型遵守。
+   * 后者在正文生成之前注入，用来防止模型顺着剧情把人设写崩。
+   *
+   * 返回空串表示不加护栏（未启用 / 没有任何内容）。
+   * 条件式纠偏复用 mood.rules 同一套 evalCmp 求值器，维度键沿用 af 短键。
+   */
+  guard() {
+    const G = this.profile.persona_guard;
+    if (!G || G.enabled !== true) return "";
+    const L = [];
+    const tctx = this.tctx;
+    const list = (arr, bullet, inline) => (Array.isArray(arr) ? arr : []).map((x) => typeof x === "string" ? x.trim() : "").filter(Boolean).map((x) => tpl(x, tctx)).map((x) => bullet == null ? x : bullet + x);
+    const always = G.always !== false;
+    if (always) {
+      const id = list(G.identity, "- ");
+      if (id.length) L.push("\u8EAB\u4EFD\uFF08\u4E0D\u53EF\u6539\uFF09\uFF1A\n" + id.join("\n"));
+      const vc = list(G.voice, "- ");
+      if (vc.length) L.push("\u8BED\u6C14\uFF08\u5FC5\u987B\u4FDD\u6301\uFF09\uFF1A\n" + vc.join("\n"));
+      const fb = list(G.forbidden, "- ");
+      if (fb.length) L.push("\u7981\u6B62\uFF08\u4EFB\u4F55\u60C5\u51B5\u90FD\u4E0D\u8BB8\uFF09\uFF1A\n" + fb.join("\n"));
+    }
+    const rules = Array.isArray(G.drift_rules) ? G.drift_rules : [];
+    const hit = [];
+    for (const r of rules) {
+      if (!r || typeof r.when !== "string" || typeof r.then !== "string") continue;
+      let m = true;
+      try {
+        m = evalCmp({ cmp: r.when }, this.af);
+      } catch (e) {
+        m = false;
+      }
+      if (m) hit.push("- \u5F53" + r.when.replace(/\s+/g, "") + "\u65F6\uFF1A" + tpl(r.then, tctx));
+    }
+    if (hit.length) L.push("\u6B64\u523B\u7684\u7EA0\u6B63\uFF1A\n" + hit.join("\n"));
+    if (!L.length) return "";
+    const head = tpl(G.header || "", this.tctx);
+    const tail = tpl(G.footer || "", this.tctx);
+    return head + L.join("\n") + tail;
+  }
   /** 注入正文：头/尾/角色名全部来自 profile.inject */
   inject() {
     const d = this.fullState();
     const I = this.profile.inject || {};
     const head = tpl(I.header || "\u3010\u5185\u5FC3\u3011\u4EE5\u4E0B\u662F{{char}}\u6B64\u523B\u6CA1\u6709\u8BF4\u51FA\u53E3\u7684\u5185\u5FC3\u72B6\u6001\uFF0C\u53EA\u80FD\u7528\u6765\u51B3\u5B9A\u8BED\u6C14\u3001\u52A8\u4F5C\u4E0E\u53CD\u5E94\uFF1B\u4E0D\u8981\u76F4\u63A5\u590D\u8FF0\u3002\n", this.tctx);
     const tail = tpl(I.footer || "", this.tctx);
-    return head + d + tail;
+    const g = this.guard();
+    return (g ? g + "\n\n" : "") + head + d + tail;
   }
 };
 function num(v, d) {
@@ -997,9 +1070,96 @@ function injectStyles() {
     "#" + PANEL_ID + " .pe-delta{min-width:2.6em;text-align:right;font-size:0.95em;}",
     "#" + PANEL_ID + " .pe-up{color:#57c07a;}",
     "#" + PANEL_ID + " .pe-down{color:#e0736a;}",
-    "#" + PANEL_ID + " .pe-flat{opacity:.35;}"
+    "#" + PANEL_ID + " .pe-flat{opacity:.35;}",
+    "#" + PANEL_ID + " .pe-head{display:flex;align-items:center;gap:8px;padding:5px 8px;margin:0 0 6px;}",
+    "#" + PANEL_ID + " .pe-head{border:1px solid rgba(128,128,128,.35);border-radius:4px;background:rgba(128,128,128,.08);}",
+    "#" + PANEL_ID + " .pe-head{font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;letter-spacing:.06em;}",
+    "#" + PANEL_ID + " .pe-name{font-weight:700;font-size:0.86em;opacity:.92;}",
+    "#" + PANEL_ID + " .pe-ver{font-size:0.78em;opacity:.6;font-variant-numeric:tabular-nums;}",
+    "#" + PANEL_ID + " .pe-led{width:8px;height:8px;border-radius:50%%;flex:0 0 auto;background:#8a8a8a;}",
+    "#" + PANEL_ID + " .pe-led.pe-on{background:#4ec46f;box-shadow:0 0 6px #4ec46f;}",
+    "#" + PANEL_ID + " .pe-led.pe-off{background:#6d6d6d;}",
+    "#" + PANEL_ID + " .pe-led.pe-warn{background:#e0b24a;box-shadow:0 0 6px #e0b24a;animation:pe-blink 1.1s ease-in-out infinite;}",
+    "#" + PANEL_ID + " .pe-led.pe-err{background:#e0534a;box-shadow:0 0 6px #e0534a;animation:pe-blink .8s ease-in-out infinite;}",
+    "#" + PANEL_ID + " .pe-chip{margin-left:auto;font-size:0.74em;padding:1px 7px;border-radius:9px;border:1px solid rgba(128,128,128,.45);opacity:.9;}",
+    "#" + PANEL_ID + " .pe-chip.pe-guard-on{color:#4ec46f;border-color:rgba(78,196,111,.6);}",
+    "#" + PANEL_ID + " .pe-chip.pe-guard-off{color:#9a9a9a;}",
+    "#" + PANEL_ID + " .pe-guardtext{font-size:0.8em;opacity:.85;line-height:1.5;white-space:pre-wrap;}",
+    "#" + PANEL_ID + " .pe-guardraw{margin:2px 0 4px;}",
+    "#" + PANEL_ID + " .pe-guardraw>summary{cursor:pointer;font-size:0.8em;opacity:.8;}",
+    "@keyframes pe-blink{0%%,100%%{opacity:1;}50%%{opacity:.35;}}"
   ].join("");
   document.head.appendChild(style);
+}
+function renderHead(root, deps) {
+  try {
+    const health = deps && deps.health || {};
+    const version = deps && deps.version || "";
+    const head = document.createElement("div");
+    head.className = "pe-head";
+    const led = document.createElement("span");
+    led.className = "pe-led";
+    const kinds = Object.keys(health).map((k) => health[k] && health[k].kind);
+    if (!kinds.length) led.classList.add("pe-off");
+    else if (kinds.indexOf("missing") >= 0) led.classList.add("pe-err");
+    else if (kinds.indexOf("fallback") >= 0) led.classList.add("pe-warn");
+    else led.classList.add("pe-on");
+    head.appendChild(led);
+    const name = document.createElement("span");
+    name.className = "pe-name";
+    name.textContent = "PERSONA ENGINE";
+    head.appendChild(name);
+    if (version) {
+      const ver = document.createElement("span");
+      ver.className = "pe-ver";
+      ver.textContent = "v" + version;
+      head.appendChild(ver);
+    }
+    const chip = document.createElement("span");
+    const on = !!(deps && deps.guardOn && deps.guardOn());
+    chip.className = "pe-chip " + (on ? "pe-guard-on" : "pe-guard-off");
+    chip.textContent = on ? "GUARD ON" : "GUARD OFF";
+    head.appendChild(chip);
+    root.appendChild(head);
+  } catch (e) {
+  }
+}
+function renderGuard(root, deps) {
+  try {
+    const g = deps && deps.guard ? deps.guard() : "";
+    const on = !!(deps && deps.guardOn && deps.guardOn());
+    const box = document.createElement("div");
+    box.className = "pe-guardraw";
+    if (!on) {
+      const hint = document.createElement("div");
+      hint.className = "pe-hint";
+      hint.textContent = "\u4EBA\u8BBE\u62A4\u680F\u672A\u542F\u7528 \xB7 \u53EF\u5728\u89D2\u8272\u5361 persona_engine_profile.persona_guard.enabled=true \u5F00\u542F";
+      box.appendChild(hint);
+      root.appendChild(box);
+      return;
+    }
+    const profile = deps && deps.profile ? deps.profile() : null;
+    const pg = profile && profile.persona_guard || {};
+    const cnt = (a) => Array.isArray(a) ? a.length : 0;
+    const chips = document.createElement("div");
+    chips.className = "pe-sum";
+    const b = document.createElement("b");
+    b.textContent = "\u4EBA\u8BBE\u62A4\u680F";
+    chips.appendChild(b);
+    chips.appendChild(document.createTextNode(" \xB7 \u8EAB\u4EFD" + cnt(pg.identity) + " / \u8BED\u6C14" + cnt(pg.voice) + " / \u7981\u6B62" + cnt(pg.forbidden) + " / \u6F02\u79FB" + cnt(pg.drift_rules)));
+    box.appendChild(chips);
+    const det = document.createElement("details");
+    const sum = document.createElement("summary");
+    sum.textContent = "ON \xB7 " + (g ? g.length : 0) + " \u5B57\u7B26";
+    det.appendChild(sum);
+    const pre = document.createElement("div");
+    pre.className = "pe-guardtext";
+    pre.textContent = g || "(\u7A7A)";
+    det.appendChild(pre);
+    box.appendChild(det);
+    root.appendChild(box);
+  } catch (e) {
+  }
 }
 function renderPanel(root, deps) {
   const { probe, healthLine: healthLine2, injectVia, selfCheckLine: selfCheckLine2, refresh, forceInject, reset } = deps;
@@ -1024,6 +1184,7 @@ function renderPanel(root, deps) {
   } catch (e) {
   }
   root.textContent = "";
+  renderHead(root, deps);
   const title = document.createElement("div");
   title.className = "pe-sum";
   const b = document.createElement("b");
@@ -1054,6 +1215,7 @@ function renderPanel(root, deps) {
   viaRow.textContent = "\u6CE8\u5165\u901A\u9053\uFF1A" + (via || "(\u672A\u6CE8\u5165)");
   root.appendChild(viaRow);
   renderPersona(root, deps);
+  renderGuard(root, deps);
   const btns = document.createElement("div");
   btns.className = "pe-btns";
   const mkBtn = (label, fn) => {
@@ -1640,6 +1802,12 @@ function exposeApi() {
       state: () => getEngine().fullState(),
       mood: () => getEngine().mood(),
       feel: () => getEngine().afText(),
+      // 人设护栏（事前约束）原文：未启用时返回空串
+      guard: () => getEngine().guard(),
+      guardOn: () => {
+        const g = getEngine().profile.persona_guard;
+        return !!(g && g.enabled === true);
+      },
       reset: () => {
         const e = getEngine();
         e.reset();
@@ -1668,7 +1836,15 @@ function exposeApi() {
         injectVia: () => lastInjectVia,
         selfCheck: (silent) => selfCheck(silent),
         selfCheckLine: () => selfCheckLine(),
-        snapshot: () => personaSnapshot()
+        snapshot: () => personaSnapshot(),
+        health: () => probeRuntime(),
+        version: ENGINE_VERSION,
+        profile: () => getProfile(true),
+        guard: () => getEngine().guard(),
+        guardOn: () => {
+          const g = getEngine().profile.persona_guard;
+          return !!(g && g.enabled === true);
+        }
       })
     };
   } catch (e) {
@@ -1725,6 +1901,14 @@ function init() {
     selfCheck: (silent) => selfCheck(silent),
     selfCheckLine: () => selfCheckLine(),
     snapshot: () => personaSnapshot(),
+    health: () => probeRuntime(),
+    version: ENGINE_VERSION,
+    profile: () => getProfile(true),
+    guard: () => getEngine().guard(),
+    guardOn: () => {
+      const g = getEngine().profile.persona_guard;
+      return !!(g && g.enabled === true);
+    },
     refresh: () => {
       getEngine(true);
       doInject("\u9762\u677F\u91CD\u8F7D");

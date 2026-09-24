@@ -589,6 +589,12 @@ function exposeApi() {
       state: () => getEngine().fullState(),
       mood: () => getEngine().mood(),
       feel: () => getEngine().afText(),
+      // 人设护栏（事前约束）原文：未启用时返回空串
+      guard: () => getEngine().guard(),
+      guardOn: () => {
+        const g = getEngine().profile.persona_guard;
+        return !!(g && g.enabled === true);
+      },
       reset: () => {
         const e = getEngine();
         e.reset();
@@ -618,6 +624,14 @@ function exposeApi() {
         selfCheck: (silent) => selfCheck(silent),
         selfCheckLine: () => selfCheckLine(),
         snapshot: () => personaSnapshot(),
+        health: () => probeRuntime(),
+        version: ENGINE_VERSION,
+        profile: () => getProfile(true),
+        guard: () => getEngine().guard(),
+        guardOn: () => {
+          const g = getEngine().profile.persona_guard;
+          return !!(g && g.enabled === true);
+        },
       }),
     };
   } catch (e) {
@@ -686,6 +700,14 @@ export function init() {
     selfCheck: (silent) => selfCheck(silent),
     selfCheckLine: () => selfCheckLine(),
     snapshot: () => personaSnapshot(),
+    health: () => probeRuntime(),
+    version: ENGINE_VERSION,
+    profile: () => getProfile(true),
+    guard: () => getEngine().guard(),
+    guardOn: () => {
+      const g = getEngine().profile.persona_guard;
+      return !!(g && g.enabled === true);
+    },
     refresh: () => {
       getEngine(true);
       doInject('面板重载');

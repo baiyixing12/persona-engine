@@ -180,10 +180,98 @@ function injectStyles() {
     '#' + PANEL_ID + ' .pe-up{color:#57c07a;}',
     '#' + PANEL_ID + ' .pe-down{color:#e0736a;}',
     '#' + PANEL_ID + ' .pe-flat{opacity:.35;}',
+    '#' + PANEL_ID + ' .pe-head{display:flex;align-items:center;gap:8px;padding:5px 8px;margin:0 0 6px;}',
+    '#' + PANEL_ID + ' .pe-head{border:1px solid rgba(128,128,128,.35);border-radius:4px;background:rgba(128,128,128,.08);}',
+    '#' + PANEL_ID + ' .pe-head{font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;letter-spacing:.06em;}',
+    '#' + PANEL_ID + ' .pe-name{font-weight:700;font-size:0.86em;opacity:.92;}',
+    '#' + PANEL_ID + ' .pe-ver{font-size:0.78em;opacity:.6;font-variant-numeric:tabular-nums;}',
+    '#' + PANEL_ID + ' .pe-led{width:8px;height:8px;border-radius:50%%;flex:0 0 auto;background:#8a8a8a;}',
+    '#' + PANEL_ID + ' .pe-led.pe-on{background:#4ec46f;box-shadow:0 0 6px #4ec46f;}',
+    '#' + PANEL_ID + ' .pe-led.pe-off{background:#6d6d6d;}',
+    '#' + PANEL_ID + ' .pe-led.pe-warn{background:#e0b24a;box-shadow:0 0 6px #e0b24a;animation:pe-blink 1.1s ease-in-out infinite;}',
+    '#' + PANEL_ID + ' .pe-led.pe-err{background:#e0534a;box-shadow:0 0 6px #e0534a;animation:pe-blink .8s ease-in-out infinite;}',
+    '#' + PANEL_ID + ' .pe-chip{margin-left:auto;font-size:0.74em;padding:1px 7px;border-radius:9px;border:1px solid rgba(128,128,128,.45);opacity:.9;}',
+    '#' + PANEL_ID + ' .pe-chip.pe-guard-on{color:#4ec46f;border-color:rgba(78,196,111,.6);}',
+    '#' + PANEL_ID + ' .pe-chip.pe-guard-off{color:#9a9a9a;}',
+    '#' + PANEL_ID + ' .pe-guardtext{font-size:0.8em;opacity:.85;line-height:1.5;white-space:pre-wrap;}',
+    '#' + PANEL_ID + ' .pe-guardraw{margin:2px 0 4px;}',
+    '#' + PANEL_ID + ' .pe-guardraw>summary{cursor:pointer;font-size:0.8em;opacity:.8;}',
+    '@keyframes pe-blink{0%%,100%%{opacity:1;}50%%{opacity:.35;}}',
   ].join('');
   document.head.appendChild(style);
 }
 
+function renderHead(root, deps) {
+  try {
+    const health = (deps && deps.health) || {};
+    const version = (deps && deps.version) || '';
+    const head = document.createElement('div');
+    head.className = 'pe-head';
+    const led = document.createElement('span');
+    led.className = 'pe-led';
+    const kinds = Object.keys(health).map((k) => health[k] && health[k].kind);
+    if (!kinds.length) led.classList.add('pe-off');
+    else if (kinds.indexOf('missing') >= 0) led.classList.add('pe-err');
+    else if (kinds.indexOf('fallback') >= 0) led.classList.add('pe-warn');
+    else led.classList.add('pe-on');
+    head.appendChild(led);
+    const name = document.createElement('span');
+    name.className = 'pe-name';
+    name.textContent = 'PERSONA ENGINE';
+    head.appendChild(name);
+    if (version) {
+      const ver = document.createElement('span');
+      ver.className = 'pe-ver';
+      ver.textContent = 'v' + version;
+      head.appendChild(ver);
+    }
+    const chip = document.createElement('span');
+    const on = !!(deps && deps.guardOn && deps.guardOn());
+    chip.className = 'pe-chip ' + (on ? 'pe-guard-on' : 'pe-guard-off');
+    chip.textContent = on ? 'GUARD ON' : 'GUARD OFF';
+    head.appendChild(chip);
+    root.appendChild(head);
+  } catch (e) {}
+}
+/**
+ * 人设护栏状态区。
+ */
+function renderGuard(root, deps) {
+  try {
+    const g = deps && deps.guard ? deps.guard() : '';
+    const on = !!(deps && deps.guardOn && deps.guardOn());
+    const box = document.createElement('div');
+    box.className = 'pe-guardraw';
+    if (!on) {
+      const hint = document.createElement('div');
+      hint.className = 'pe-hint';
+      hint.textContent = '人设护栏未启用 · 可在角色卡 persona_engine_profile.persona_guard.enabled=true 开启';
+      box.appendChild(hint);
+      root.appendChild(box);
+      return;
+    }
+    const profile = deps && deps.profile ? deps.profile() : null;
+    const pg = (profile && profile.persona_guard) || {};
+    const cnt = (a) => (Array.isArray(a) ? a.length : 0);
+    const chips = document.createElement('div');
+    chips.className = 'pe-sum';
+    const b = document.createElement('b');
+    b.textContent = '人设护栏';
+    chips.appendChild(b);
+    chips.appendChild(document.createTextNode(' · 身份' + cnt(pg.identity) + ' / 语气' + cnt(pg.voice) + ' / 禁止' + cnt(pg.forbidden) + ' / 漂移' + cnt(pg.drift_rules)));
+    box.appendChild(chips);
+    const det = document.createElement('details');
+    const sum = document.createElement('summary');
+    sum.textContent = 'ON · ' + (g ? g.length : 0) + ' 字符';
+    det.appendChild(sum);
+    const pre = document.createElement('div');
+    pre.className = 'pe-guardtext';
+    pre.textContent = g || '(空)';
+    det.appendChild(pre);
+    box.appendChild(det);
+    root.appendChild(box);
+  } catch (e) {}
+}
 /**
  * 渲染/刷新面板内容。
  * @param {HTMLElement} root 面板根节点
@@ -213,6 +301,8 @@ function renderPanel(root, deps) {
 
   // 清空重绘
   root.textContent = '';
+  // 工业风标题栏（必须在清空之后，否则会被自身擦除）
+  renderHead(root, deps);
 
   const title = document.createElement('div');
   title.className = 'pe-sum';
@@ -252,6 +342,8 @@ function renderPanel(root, deps) {
 
   // 人格状态区：七维数值条 + 情绪/倾向/目标 + 与上次的变化箭头
   renderPersona(root, deps);
+  // 人设护栏状态区
+  renderGuard(root, deps);
 
   // 操作按钮
   const btns = document.createElement('div');

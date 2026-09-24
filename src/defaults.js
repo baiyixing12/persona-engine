@@ -22,7 +22,7 @@
  * 叫用户「哥哥」或提到某部作品。角色卡想改，就在卡内变量里覆盖对应 key。
  */
 
-export const ENGINE_VERSION = '0.3.1';
+export const ENGINE_VERSION = '0.4.0';
 
 /* 一个中性的小事件集。角色卡可以通过覆盖 profile.events 整体替换。 */
 export const DEFAULT_EVENTS = [
@@ -282,6 +282,34 @@ export const DEFAULT_PROFILE = {
        v>=-0.25 不为 cold；s>=0.35 不为 unsafe。 */
     af: { v: 0.15, a: 0.25, s: 0.5, u: 0.35, c: 0.2, ct: 0.3, bc: 0.3 },
     self: { esteem: 0.3, efficacy: 0.3, coherence: 0.5 },
+  },
+
+  /* ---------- 人设护栏（事前约束） ----------
+   * 与 inject 的区别：inject 说的是「此刻的内心状态」，是事后如实汇报；
+   * persona_guard 说的是「你无论如何都必须守住的东西」，是生成前的硬约束。
+   * 它在正文生成之前注入，用来防止模型为了顺着剧情把人设写崩。
+   *
+   * 结构：
+   *   enabled      -- 总开关
+   *   identity[]   -- 不可改的身份事实（如 '17岁，高二'）
+   *   voice[]      -- 语气契约（如 '句子短'、'不解释自己'）
+   *   forbidden[]  -- 绝对禁止（如 '不把痛苦当筹码'）
+   *   drift_rules[]-- 状态触发式纠偏：{ when:'维度比较式', then:'做法' }
+   *                   when 里的维度名沿用 af 的短键，与 mood.rules 同一套求值器：
+   *                   v 心情 / a 张力 / s 安全感 / u 不确定 / c 连接 / ct 亲近 / bc 边界舒适
+   *                   例：{ when:'s < 0.30', then:'先退半步，不主动贴近' }
+   *   header/footer-- 段落包装文本（{{char}} 会被替换）
+   *   always       -- 是否总是输出 identity/voice/forbidden（drift 命中项另行追加）
+   */
+  persona_guard: {
+    enabled: false, // 默认关：空护栏对任何卡都是噪音，由角色卡自己打开
+    always: true,
+    header: '【人设护栏】以下是{{char}}在任何情况下都不能违背的设定，优先级高于剧情推进的便利。\n',
+    footer: '\n（若上文与此处冲突，以此处为准。）',
+    identity: [],
+    voice: [],
+    forbidden: [],
+    drift_rules: [],
   },
 
   bounds: { low: 0, high: 10, initial: 5 },
