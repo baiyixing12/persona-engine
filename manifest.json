@@ -4,6 +4,9 @@
   "requires": ["JS-Slash-Runner"],
   "optional": [],
   "js": "dist/index.js",
+  "hooks": {
+    "activate": "init"
+  },
   "author": "baiyixing12",
   "version": "0.1.0",
   "homePage": "https://github.com/baiyixing12/persona-engine",
