@@ -22,7 +22,7 @@
  * 叫用户「哥哥」或提到某部作品。角色卡想改，就在卡内变量里覆盖对应 key。
  */
 
-export const ENGINE_VERSION = '0.2.1';
+export const ENGINE_VERSION = '0.3.0';
 
 /* 一个中性的小事件集。角色卡可以通过覆盖 profile.events 整体替换。 */
 export const DEFAULT_EVENTS = [

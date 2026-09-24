@@ -114,9 +114,15 @@ function setHealth(key, kind, note) {
 }
 
 function probeRuntime() {
+  // 酒馆助手把 API 暴露在 window.TavernHelper.* 命名空间下（不是裸全局名！）。
+  // 裸 injectPrompts/eventOn/registerMacroLike 只在「脚本 iframe」内经 predefine.js 拍平可用，
+  // 普通扩展（含本扩展）必须走 window.TavernHelper.*，否则会误报 missing。
+  const TH = (typeof window !== 'undefined' && window.TavernHelper) || (globalThis && globalThis.TavernHelper) || null;
   // 注入通道
-  if (typeof injectPrompts === 'function') {
-    setHealth('inject', 'ok', 'injectPrompts @ 酒馆助手');
+  if (TH && typeof TH.injectPrompts === 'function') {
+    setHealth('inject', 'ok', 'TavernHelper.injectPrompts @ 酒馆助手');
+  } else if (typeof injectPrompts === 'function') {
+    setHealth('inject', 'ok', 'injectPrompts @ 脚本作用域');
   } else if (typeof SillyTavern !== 'undefined' && SillyTavern.getContext) {
     try {
       const c = SillyTavern.getContext();
@@ -129,19 +135,23 @@ function probeRuntime() {
     setHealth('inject', 'missing', 'injectPrompts 与 SillyTavern 均不可用');
   }
   // 事件通道
-  if (typeof eventOn === 'function') setHealth('events', 'ok', 'eventOn @ 酒馆助手');
+  if (TH && typeof TH.eventOn === 'function') setHealth('events', 'ok', 'TavernHelper.eventOn @ 酒馆助手');
+  else if (typeof eventOn === 'function') setHealth('events', 'ok', 'eventOn @ 脚本作用域');
   else if ((typeof eventSource !== 'undefined' && eventSource) || (getCtx() && getCtx().eventSource)) setHealth('events', 'ok', 'eventSource.on @ ST');
   else setHealth('events', 'missing', '未找到事件源');
   // 宏通道
-  if (typeof registerMacroLike === 'function') setHealth('macros', 'ok', 'registerMacroLike @ 酒馆助手');
+  if (TH && typeof TH.registerMacroLike === 'function') setHealth('macros', 'ok', 'TavernHelper.registerMacroLike @ 酒馆助手');
+  else if (typeof registerMacroLike === 'function') setHealth('macros', 'ok', 'registerMacroLike @ 脚本作用域');
   else setHealth('macros', 'missing', '缺少 registerMacroLike（需酒馆助手）');
-  // 斜杠命令
+  // 斜杠命令（ST 原生）
   const _c = getCtx();
   const _p = (_c && _c.SlashCommandParser) || (typeof SillyTavern !== 'undefined' && SillyTavern.SlashCommandParser);
   if (_p && typeof _p.addCommandObject === 'function') setHealth('commands', 'ok', 'SlashCommandParser @ ST');
   else setHealth('commands', 'missing', '缺少 SlashCommandParser');
-  // 变量通道
-  if (globalThis.TavernHelper && typeof globalThis.TavernHelper.getVariables === 'function') setHealth('vars', 'ok', 'TavernHelper.getVariables');
+  // 变量通道（写入用 insertOrAssignVariables，读用 getVariables）
+  const _hasVars = TH && (typeof TH.getVariables === 'function' || typeof TH.insertOrAssignVariables === 'function');
+  if (_hasVars) setHealth('vars', 'ok', 'TavernHelper 变量接口 @ 酒馆助手');
+  else if (globalThis.TavernHelper && typeof globalThis.TavernHelper.getVariables === 'function') setHealth('vars', 'ok', 'globalThis.TavernHelper.getVariables');
   else setHealth('vars', 'missing', '缺少 TavernHelper（变量无法持久化）');
   return HEALTH;
 }
@@ -163,7 +173,11 @@ function healthLine() {
  * kind: 'pass' | 'warn' | 'fail'
  */
 let lastSelfCheck = null;
-
+const SELFCHECK_TTL_MS = 30000; // 30s 内缓存可信，过期强制重探（解「僵尸快照」）
+function selfCheckStale() {
+  if (!lastSelfCheck) return true;
+  return (Date.now() - (lastSelfCheck.at || 0)) > SELFCHECK_TTL_MS;
+}
 function selfCheck(silent) {
   const strip = [];
   const mark = (id, kind, note) => strip.push({ id, kind, note: note || '' });
@@ -199,27 +213,17 @@ function selfCheck(silent) {
     mark('engine', 'fail', '实例化失败：' + (e && e.message));
   }
 
-  // 3) 注入一次（用引擎真实内容，验证注入通道真的能落地）
-  try {
-    doInject('自检');
-    mark('inject-run', lastInjectVia ? 'pass' : 'fail', lastInjectVia ? '注入成功经 ' + lastInjectVia : '两条注入通道都不通');
-  } catch (e) {
-    mark('inject-run', 'fail', '注入抛出异常：' + (e && e.message));
+  // 3) 注入通道状态（纯读，不真注入 —— 「纯被动」原则）
+  {
+    const k = kindOf('inject');
+    mark('inject-run', k === 'ok' ? 'pass' : k === 'fallback' ? 'warn' : 'fail',
+      k === 'ok' ? '注入通道就绪（TavernHelper）' : k === 'fallback' ? '仅 ST 原生兜底' : '两条注入通道都不通');
   }
-
-  // 4) 变量通道：真写一次，验证持久化闭环
-  try {
-    if (globalThis.TavernHelper && typeof globalThis.TavernHelper.insertOrAssignVariables === 'function' && eng) {
-      globalThis.TavernHelper.insertOrAssignVariables({ [eng.key]: { __selfcheck: Date.now() } }, { type: 'script' });
-      mark('vars-run', 'pass', '变量可写（TavernHelper）');
-    } else if (typeof localStorage !== 'undefined') {
-      localStorage.setItem('persona_engine_selfcheck', String(Date.now()));
-      mark('vars-run', 'warn', '退回 localStorage 可写');
-    } else {
-      mark('vars-run', 'fail', '无可持久化通道');
-    }
-  } catch (e) {
-    mark('vars-run', 'fail', '变量写入失败：' + (e && e.message));
+  // 4) 变量通道（纯读，不写）
+  {
+    const k = kindOf('vars');
+    mark('vars-run', k === 'ok' ? 'pass' : k === 'warn' ? 'warn' : 'fail',
+      k === 'ok' ? '变量接口就绪（TavernHelper）' : '变量通道缺失或降级');
   }
 
   // 5) 持久化状态回读（能不能把已存的人格读回来）
@@ -248,8 +252,8 @@ function selfCheck(silent) {
 }
 
 /** 内部自检的一行摘要，用于面板标题：如 "自检✅ 全部通过 · 12ms" */
-function selfCheckLine() {
-  const s = lastSelfCheck || selfCheck(true);
+function selfCheckLine(force) {
+  const s = (!lastSelfCheck || force || selfCheckStale()) ? selfCheck(true) : lastSelfCheck;
   const icon = s.fails ? '❌' : s.warns ? '🟡' : '✅';
   return '自检' + icon + ' ' + s.summary + ' · ' + s.durationMs + 'ms';
 }
@@ -259,7 +263,13 @@ function selfCheckLine() {
  * 与上一次快照对比得出 ↑↓ 变化量，让「人格在怎么变」一眼可见。
  */
 let prevSnapshot = null;
-
+/** 轮次节点提交基线：每轮对话/生成结束后调用，delta 才有意义 */
+function commitSnapshot() {
+  try {
+    const snap = personaSnapshot();
+    if (snap) prevSnapshot = { dims: Object.assign({}, snap.dims), at: snap.at };
+  } catch (e) {}
+}
 function personaSnapshot() {
   let eng = null;
   try {
@@ -291,7 +301,8 @@ function personaSnapshot() {
   }
   snap.delta = prevSnapshot ? delta : null;
   snap.prevAt = prevSnapshot ? prevSnapshot.at : null;
-  prevSnapshot = { dims: Object.assign({}, snap.dims), at: snap.at };
+  // 不在每次读快照时覆盖基线（否则面板反复 open 会把 delta 冲成 0）；
+  // 基线只在「轮次节点」更新，见 commitSnapshot()。
   return snap;
 }
 
@@ -323,17 +334,21 @@ function doInject(reason) {
     const depth = (p.inject && p.inject.depth) || 4;
     const role = (p.inject && p.inject.role) || 'system';
 
-    // 主通道：酒馆助手 injectPrompts
-    if (typeof injectPrompts === 'function') {
-      if (injected && typeof uninjectPrompts === 'function') {
+    // 主通道：酒馆助手 injectPrompts（API 位于 window.TavernHelper.*，不是裸名）
+    const TH = (typeof window !== 'undefined' && window.TavernHelper) || (globalThis && globalThis.TavernHelper) || null;
+    const _inject = (TH && typeof TH.injectPrompts === 'function' && TH.injectPrompts) || (typeof injectPrompts === 'function' ? injectPrompts : null);
+    const _uninject = (TH && typeof TH.uninjectPrompts === 'function' && TH.uninjectPrompts) || (typeof uninjectPrompts === 'function' ? uninjectPrompts : null);
+    if (typeof _inject === 'function') {
+      if (injected && typeof _uninject === 'function') {
         try {
-          uninjectPrompts([PROMPT_ID]);
+          _uninject([PROMPT_ID]);
         } catch (err) {}
       }
-      injectPrompts(
+      _inject(
         [{ id: PROMPT_ID, position: 'in_chat', depth, role, content, should_scan: true }],
         { once: false }
       );
+      if (TH && typeof TH.injectPrompts === 'function') HEALTH.inject = { kind: 'ok', note: 'TavernHelper.injectPrompts @ 酒馆助手' };
       injected = true;
       lastInjectVia = 'tavernhelper';
       log('已注入' + (reason ? '(' + reason + ')' : ''), content.length + '字', '[酒馆助手]');
@@ -361,6 +376,11 @@ function doInject(reason) {
 /* ---------------- 事件绑定 ---------------- */
 function onEvent(name, fn) {
   try {
+    const TH = (typeof window !== 'undefined' && window.TavernHelper) || (globalThis && globalThis.TavernHelper) || null;
+    if (TH && typeof TH.eventOn === 'function') {
+      TH.eventOn(name, fn);
+      return true;
+    }
     if (typeof eventOn === 'function') {
       eventOn(name, fn);
       return true;
@@ -412,6 +432,7 @@ function onMsg(id, type) {
     const e = getEngine();
     e.evolve(txt, 'char', charName() || '对方', false);
     doInject('新消息');
+    commitSnapshot(); // 轮次节点：把本轮结束时的七维提交为基线，面板 delta 才有参照
     const p = e.profile || {};
     if (p.toast_on_evolve) toast((p.meta && p.meta.name) || '人格' + ' · ' + e.mood());
   } catch (e) {
@@ -441,8 +462,10 @@ function pushState(force) {
     const sig = JSON.stringify(snapshot);
     if (!force && sig === lastPush) return false;
     lastPush = sig;
-    if (typeof insertOrAssignVariables === 'function') {
-      insertOrAssignVariables({ [path]: snapshot }, { type: 'chat' });
+    const _THi = (typeof window !== 'undefined' && window.TavernHelper) || (globalThis && globalThis.TavernHelper) || null;
+    const _iav = (_THi && typeof _THi.insertOrAssignVariables === 'function' && _THi.insertOrAssignVariables) || (typeof insertOrAssignVariables === 'function' ? insertOrAssignVariables : null);
+    if (typeof _iav === 'function') {
+      _iav({ [path]: snapshot }, { type: 'chat' });
       return true;
     }
     if (globalThis.TavernHelper && typeof globalThis.TavernHelper.insertOrAssignVariables === 'function') {
@@ -581,12 +604,12 @@ function exposeApi() {
       injectVia: () => lastInjectVia,
       // 内部自检：在 Console 里敲 personaEngine.selfCheck() 就能让扩展「自证活着」
       selfCheck: (silent) => selfCheck(silent),
-      selfCheckLine: () => selfCheckLine(),
+      selfCheckLine: (force) => selfCheckLine(force),
       // 人格快照：直接读实时七维 + 情绪 + 倾向 + 目标，并给出与上一次的差值
       snapshot: () => personaSnapshot(),
       EXTENSION_ID,
       CARD_OVERRIDE_KEY,
-      version: '0.2.0',
+      version: '0.3.0',
       panel: () => mountPanelWithRetry({
         probe: probeRuntime,
         healthLine,

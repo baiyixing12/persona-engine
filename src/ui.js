@@ -274,7 +274,7 @@ function renderPanel(root, deps) {
     return btn;
   };
 
-  btns.appendChild(mkBtn('重新检测', () => {}));
+  btns.appendChild(mkBtn('重新检测', () => { if (selfCheckLine) selfCheckLine(true); }));
   if (refresh) btns.appendChild(mkBtn('重载配置', refresh));
   if (forceInject) btns.appendChild(mkBtn('强制注入', forceInject));
   if (reset) btns.appendChild(mkBtn('重置状态', reset));

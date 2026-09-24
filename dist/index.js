@@ -1,5 +1,5 @@
 // src/defaults.js
-var ENGINE_VERSION = "0.2.1";
+var ENGINE_VERSION = "0.3.0";
 var DEFAULT_EVENTS = [
   // 注意：`抱` 必须排除「抱歉」，否则任何道歉都会被误判成亲密（中文子串陷阱）。
   { id: "intimate", pattern: "\u62E5\u62B1|(?:\u62B1)(?!\u6B49)|\u7275\u624B|\u9760\u7740|\u8D34\u8FD1|\u4F9D\u504E", z: 0.75, effect: { valence: 0.35, arousal: 0.15 } },
@@ -1033,6 +1033,7 @@ function renderPanel(root, deps) {
     return btn;
   };
   btns.appendChild(mkBtn("\u91CD\u65B0\u68C0\u6D4B", () => {
+    if (selfCheckLine2) selfCheckLine2(true);
   }));
   if (refresh) btns.appendChild(mkBtn("\u91CD\u8F7D\u914D\u7F6E", refresh));
   if (forceInject) btns.appendChild(mkBtn("\u5F3A\u5236\u6CE8\u5165", forceInject));
@@ -1174,8 +1175,11 @@ function setHealth(key, kind, note) {
   HEALTH[key] = { kind, note: note || "", at: Date.now() };
 }
 function probeRuntime() {
-  if (typeof injectPrompts === "function") {
-    setHealth("inject", "ok", "injectPrompts @ \u9152\u9986\u52A9\u624B");
+  const TH = typeof window !== "undefined" && window.TavernHelper || globalThis && globalThis.TavernHelper || null;
+  if (TH && typeof TH.injectPrompts === "function") {
+    setHealth("inject", "ok", "TavernHelper.injectPrompts @ \u9152\u9986\u52A9\u624B");
+  } else if (typeof injectPrompts === "function") {
+    setHealth("inject", "ok", "injectPrompts @ \u811A\u672C\u4F5C\u7528\u57DF");
   } else if (typeof SillyTavern !== "undefined" && SillyTavern.getContext) {
     try {
       const c = SillyTavern.getContext();
@@ -1187,16 +1191,20 @@ function probeRuntime() {
   } else {
     setHealth("inject", "missing", "injectPrompts \u4E0E SillyTavern \u5747\u4E0D\u53EF\u7528");
   }
-  if (typeof eventOn === "function") setHealth("events", "ok", "eventOn @ \u9152\u9986\u52A9\u624B");
+  if (TH && typeof TH.eventOn === "function") setHealth("events", "ok", "TavernHelper.eventOn @ \u9152\u9986\u52A9\u624B");
+  else if (typeof eventOn === "function") setHealth("events", "ok", "eventOn @ \u811A\u672C\u4F5C\u7528\u57DF");
   else if (typeof eventSource !== "undefined" && eventSource || getCtx() && getCtx().eventSource) setHealth("events", "ok", "eventSource.on @ ST");
   else setHealth("events", "missing", "\u672A\u627E\u5230\u4E8B\u4EF6\u6E90");
-  if (typeof registerMacroLike === "function") setHealth("macros", "ok", "registerMacroLike @ \u9152\u9986\u52A9\u624B");
+  if (TH && typeof TH.registerMacroLike === "function") setHealth("macros", "ok", "TavernHelper.registerMacroLike @ \u9152\u9986\u52A9\u624B");
+  else if (typeof registerMacroLike === "function") setHealth("macros", "ok", "registerMacroLike @ \u811A\u672C\u4F5C\u7528\u57DF");
   else setHealth("macros", "missing", "\u7F3A\u5C11 registerMacroLike\uFF08\u9700\u9152\u9986\u52A9\u624B\uFF09");
   const _c = getCtx();
   const _p = _c && _c.SlashCommandParser || typeof SillyTavern !== "undefined" && SillyTavern.SlashCommandParser;
   if (_p && typeof _p.addCommandObject === "function") setHealth("commands", "ok", "SlashCommandParser @ ST");
   else setHealth("commands", "missing", "\u7F3A\u5C11 SlashCommandParser");
-  if (globalThis.TavernHelper && typeof globalThis.TavernHelper.getVariables === "function") setHealth("vars", "ok", "TavernHelper.getVariables");
+  const _hasVars = TH && (typeof TH.getVariables === "function" || typeof TH.insertOrAssignVariables === "function");
+  if (_hasVars) setHealth("vars", "ok", "TavernHelper \u53D8\u91CF\u63A5\u53E3 @ \u9152\u9986\u52A9\u624B");
+  else if (globalThis.TavernHelper && typeof globalThis.TavernHelper.getVariables === "function") setHealth("vars", "ok", "globalThis.TavernHelper.getVariables");
   else setHealth("vars", "missing", "\u7F3A\u5C11 TavernHelper\uFF08\u53D8\u91CF\u65E0\u6CD5\u6301\u4E45\u5316\uFF09");
   return HEALTH;
 }
@@ -1209,6 +1217,11 @@ function healthLine() {
   return "\u6CE8\u5165" + mark("inject") + " \u4E8B\u4EF6" + mark("events") + " \u5B8F" + mark("macros") + " \u547D\u4EE4" + mark("commands") + " \u53D8\u91CF" + mark("vars");
 }
 var lastSelfCheck = null;
+var SELFCHECK_TTL_MS = 3e4;
+function selfCheckStale() {
+  if (!lastSelfCheck) return true;
+  return Date.now() - (lastSelfCheck.at || 0) > SELFCHECK_TTL_MS;
+}
 function selfCheck(silent) {
   const strip = [];
   const mark = (id, kind, note) => strip.push({ id, kind, note: note || "" });
@@ -1239,24 +1252,21 @@ function selfCheck(silent) {
   } catch (e) {
     mark("engine", "fail", "\u5B9E\u4F8B\u5316\u5931\u8D25\uFF1A" + (e && e.message));
   }
-  try {
-    doInject("\u81EA\u68C0");
-    mark("inject-run", lastInjectVia ? "pass" : "fail", lastInjectVia ? "\u6CE8\u5165\u6210\u529F\u7ECF " + lastInjectVia : "\u4E24\u6761\u6CE8\u5165\u901A\u9053\u90FD\u4E0D\u901A");
-  } catch (e) {
-    mark("inject-run", "fail", "\u6CE8\u5165\u629B\u51FA\u5F02\u5E38\uFF1A" + (e && e.message));
+  {
+    const k = kindOf("inject");
+    mark(
+      "inject-run",
+      k === "ok" ? "pass" : k === "fallback" ? "warn" : "fail",
+      k === "ok" ? "\u6CE8\u5165\u901A\u9053\u5C31\u7EEA\uFF08TavernHelper\uFF09" : k === "fallback" ? "\u4EC5 ST \u539F\u751F\u515C\u5E95" : "\u4E24\u6761\u6CE8\u5165\u901A\u9053\u90FD\u4E0D\u901A"
+    );
   }
-  try {
-    if (globalThis.TavernHelper && typeof globalThis.TavernHelper.insertOrAssignVariables === "function" && eng) {
-      globalThis.TavernHelper.insertOrAssignVariables({ [eng.key]: { __selfcheck: Date.now() } }, { type: "script" });
-      mark("vars-run", "pass", "\u53D8\u91CF\u53EF\u5199\uFF08TavernHelper\uFF09");
-    } else if (typeof localStorage !== "undefined") {
-      localStorage.setItem("persona_engine_selfcheck", String(Date.now()));
-      mark("vars-run", "warn", "\u9000\u56DE localStorage \u53EF\u5199");
-    } else {
-      mark("vars-run", "fail", "\u65E0\u53EF\u6301\u4E45\u5316\u901A\u9053");
-    }
-  } catch (e) {
-    mark("vars-run", "fail", "\u53D8\u91CF\u5199\u5165\u5931\u8D25\uFF1A" + (e && e.message));
+  {
+    const k = kindOf("vars");
+    mark(
+      "vars-run",
+      k === "ok" ? "pass" : k === "warn" ? "warn" : "fail",
+      k === "ok" ? "\u53D8\u91CF\u63A5\u53E3\u5C31\u7EEA\uFF08TavernHelper\uFF09" : "\u53D8\u91CF\u901A\u9053\u7F3A\u5931\u6216\u964D\u7EA7"
+    );
   }
   try {
     if (eng) {
@@ -1280,12 +1290,19 @@ function selfCheck(silent) {
   if (!silent) log2("\u5185\u90E8\u81EA\u68C0", lastSelfCheck.summary, lastSelfCheck.durationMs + "ms");
   return lastSelfCheck;
 }
-function selfCheckLine() {
-  const s = lastSelfCheck || selfCheck(true);
+function selfCheckLine(force) {
+  const s = !lastSelfCheck || force || selfCheckStale() ? selfCheck(true) : lastSelfCheck;
   const icon = s.fails ? "\u274C" : s.warns ? "\u{1F7E1}" : "\u2705";
   return "\u81EA\u68C0" + icon + " " + s.summary + " \xB7 " + s.durationMs + "ms";
 }
 var prevSnapshot = null;
+function commitSnapshot() {
+  try {
+    const snap = personaSnapshot();
+    if (snap) prevSnapshot = { dims: Object.assign({}, snap.dims), at: snap.at };
+  } catch (e) {
+  }
+}
 function personaSnapshot() {
   let eng = null;
   try {
@@ -1328,7 +1345,6 @@ function personaSnapshot() {
   }
   snap.delta = prevSnapshot ? delta : null;
   snap.prevAt = prevSnapshot ? prevSnapshot.at : null;
-  prevSnapshot = { dims: Object.assign({}, snap.dims), at: snap.at };
   return snap;
 }
 var injected = false;
@@ -1351,17 +1367,21 @@ function doInject(reason) {
     const content = e.inject();
     const depth = p.inject && p.inject.depth || 4;
     const role = p.inject && p.inject.role || "system";
-    if (typeof injectPrompts === "function") {
-      if (injected && typeof uninjectPrompts === "function") {
+    const TH = typeof window !== "undefined" && window.TavernHelper || globalThis && globalThis.TavernHelper || null;
+    const _inject = TH && typeof TH.injectPrompts === "function" && TH.injectPrompts || (typeof injectPrompts === "function" ? injectPrompts : null);
+    const _uninject = TH && typeof TH.uninjectPrompts === "function" && TH.uninjectPrompts || (typeof uninjectPrompts === "function" ? uninjectPrompts : null);
+    if (typeof _inject === "function") {
+      if (injected && typeof _uninject === "function") {
         try {
-          uninjectPrompts([PROMPT_ID]);
+          _uninject([PROMPT_ID]);
         } catch (err) {
         }
       }
-      injectPrompts(
+      _inject(
         [{ id: PROMPT_ID, position: "in_chat", depth, role, content, should_scan: true }],
         { once: false }
       );
+      if (TH && typeof TH.injectPrompts === "function") HEALTH.inject = { kind: "ok", note: "TavernHelper.injectPrompts @ \u9152\u9986\u52A9\u624B" };
       injected = true;
       lastInjectVia = "tavernhelper";
       log2("\u5DF2\u6CE8\u5165" + (reason ? "(" + reason + ")" : ""), content.length + "\u5B57", "[\u9152\u9986\u52A9\u624B]");
@@ -1383,6 +1403,11 @@ function doInject(reason) {
 }
 function onEvent(name, fn) {
   try {
+    const TH = typeof window !== "undefined" && window.TavernHelper || globalThis && globalThis.TavernHelper || null;
+    if (TH && typeof TH.eventOn === "function") {
+      TH.eventOn(name, fn);
+      return true;
+    }
     if (typeof eventOn === "function") {
       eventOn(name, fn);
       return true;
@@ -1431,6 +1456,7 @@ function onMsg(id, type) {
     const e = getEngine();
     e.evolve(txt, "char", charName() || "\u5BF9\u65B9", false);
     doInject("\u65B0\u6D88\u606F");
+    commitSnapshot();
     const p = e.profile || {};
     if (p.toast_on_evolve) toast(p.meta && p.meta.name || "\u4EBA\u683C \xB7 " + e.mood());
   } catch (e) {
@@ -1457,8 +1483,10 @@ function pushState(force) {
     const sig = JSON.stringify(snapshot);
     if (!force && sig === lastPush) return false;
     lastPush = sig;
-    if (typeof insertOrAssignVariables === "function") {
-      insertOrAssignVariables({ [path]: snapshot }, { type: "chat" });
+    const _THi = typeof window !== "undefined" && window.TavernHelper || globalThis && globalThis.TavernHelper || null;
+    const _iav = _THi && typeof _THi.insertOrAssignVariables === "function" && _THi.insertOrAssignVariables || (typeof insertOrAssignVariables === "function" ? insertOrAssignVariables : null);
+    if (typeof _iav === "function") {
+      _iav({ [path]: snapshot }, { type: "chat" });
       return true;
     }
     if (globalThis.TavernHelper && typeof globalThis.TavernHelper.insertOrAssignVariables === "function") {
@@ -1589,12 +1617,12 @@ function exposeApi() {
       injectVia: () => lastInjectVia,
       // 内部自检：在 Console 里敲 personaEngine.selfCheck() 就能让扩展「自证活着」
       selfCheck: (silent) => selfCheck(silent),
-      selfCheckLine: () => selfCheckLine(),
+      selfCheckLine: (force) => selfCheckLine(force),
       // 人格快照：直接读实时七维 + 情绪 + 倾向 + 目标，并给出与上一次的差值
       snapshot: () => personaSnapshot(),
       EXTENSION_ID,
       CARD_OVERRIDE_KEY,
-      version: "0.2.0",
+      version: "0.3.0",
       panel: () => mountPanelWithRetry({
         probe: probeRuntime,
         healthLine,
