@@ -98,32 +98,121 @@ function getEngine(force) {
   return engine;
 }
 
+/* ---------------- 运行时自检 ---------------- */
+/* 记录每个软依赖是否就绪，供状态面板 / 全局 API 读取。
+   kind: 'ok' | 'fallback' | 'missing'
+   - injectPrompts : 酒馆助手注入接口（缺失时回退 ST 原生 setExtensionPrompt）
+   - registerMacroLike : 酒馆助手宏接口
+   - eventOn / eventSource : 事件源（二选一即可）
+   - SlashCommandParser : ST 原生斜杠命令解析器（ST 自带，通常可用）
+   - TavernHelper : 变量读写通道                       */
+const HEALTH = {};
+
+function setHealth(key, kind, note) {
+  HEALTH[key] = { kind, note: note || '', at: Date.now() };
+}
+
+function probeRuntime() {
+  // 注入通道
+  if (typeof injectPrompts === 'function') {
+    setHealth('inject', 'ok', 'injectPrompts @ 酒馆助手');
+  } else if (typeof SillyTavern !== 'undefined' && SillyTavern.getContext) {
+    try {
+      const c = SillyTavern.getContext();
+      if (c && typeof c.setExtensionPrompt === 'function') setHealth('inject', 'fallback', 'ST 原生 setExtensionPrompt');
+      else setHealth('inject', 'missing', '两条注入通道都不可用');
+    } catch (e) {
+      setHealth('inject', 'missing', '探测 setExtensionPrompt 出错');
+    }
+  } else {
+    setHealth('inject', 'missing', 'injectPrompts 与 SillyTavern 均不可用');
+  }
+  // 事件通道
+  if (typeof eventOn === 'function') setHealth('events', 'ok', 'eventOn @ 酒馆助手');
+  else if ((typeof eventSource !== 'undefined' && eventSource) || (getCtx() && getCtx().eventSource)) setHealth('events', 'ok', 'eventSource.on @ ST');
+  else setHealth('events', 'missing', '未找到事件源');
+  // 宏通道
+  if (typeof registerMacroLike === 'function') setHealth('macros', 'ok', 'registerMacroLike @ 酒馆助手');
+  else setHealth('macros', 'missing', '缺少 registerMacroLike（需酒馆助手）');
+  // 斜杠命令
+  const _c = getCtx();
+  const _p = (_c && _c.SlashCommandParser) || (typeof SillyTavern !== 'undefined' && SillyTavern.SlashCommandParser);
+  if (_p && typeof _p.addCommandObject === 'function') setHealth('commands', 'ok', 'SlashCommandParser @ ST');
+  else setHealth('commands', 'missing', '缺少 SlashCommandParser');
+  // 变量通道
+  if (globalThis.TavernHelper && typeof globalThis.TavernHelper.getVariables === 'function') setHealth('vars', 'ok', 'TavernHelper.getVariables');
+  else setHealth('vars', 'missing', '缺少 TavernHelper（变量无法持久化）');
+  return HEALTH;
+}
+
+/** 一行式健康摘要，用于 toast / API：如 "注入✅ 事件✅ 宏✅ 命令✅ 变量✅" */
+function healthLine() {
+  const mark = (k) => {
+    const h = HEALTH[k];
+    if (!h) return '❔';
+    return h.kind === 'ok' ? '✅' : h.kind === 'fallback' ? '🟡' : '❌';
+  };
+  return '注入' + mark('inject') + ' 事件' + mark('events') + ' 宏' + mark('macros') + ' 命令' + mark('commands') + ' 变量' + mark('vars');
+}
+
 /* ---------------- 注入 ---------------- */
 let injected = false;
+let lastInjectVia = '';
+
+/* 回退通道：ST 原生 setExtensionPrompt(id, value, position, depth)
+   position 映射：in_chat → 1；此处只用于酒馆助手缺失时兜底。
+   注意：setExtensionPrompt 的 signature 在不同 ST 版本略有差异，
+   故整体包在 try 中，失败即视为不可用，绝不抛出。 */
+function injectViaNative(content, depth) {
+  try {
+    const c = getCtx();
+    if (!c || typeof c.setExtensionPrompt !== 'function') return false;
+    c.setExtensionPrompt(PROMPT_ID, content, 1, depth);
+    return true;
+  } catch (e) {
+    return false;
+  }
+}
 
 function doInject(reason) {
   try {
     const e = getEngine();
     const p = e.profile || {};
     if (p.inject && p.inject.show === false) return;
-    if (typeof injectPrompts !== 'function') {
-      log('injectPrompts 不可用，跳过注入');
-      return;
-    }
     const content = e.inject();
-    if (injected && typeof uninjectPrompts === 'function') {
-      try {
-        uninjectPrompts([PROMPT_ID]);
-      } catch (err) {}
-    }
     const depth = (p.inject && p.inject.depth) || 4;
     const role = (p.inject && p.inject.role) || 'system';
-    injectPrompts(
-      [{ id: PROMPT_ID, position: 'in_chat', depth, role, content, should_scan: true }],
-      { once: false }
-    );
-    injected = true;
-    log('已注入' + (reason ? '(' + reason + ')' : ''), content.length + '字');
+
+    // 主通道：酒馆助手 injectPrompts
+    if (typeof injectPrompts === 'function') {
+      if (injected && typeof uninjectPrompts === 'function') {
+        try {
+          uninjectPrompts([PROMPT_ID]);
+        } catch (err) {}
+      }
+      injectPrompts(
+        [{ id: PROMPT_ID, position: 'in_chat', depth, role, content, should_scan: true }],
+        { once: false }
+      );
+      injected = true;
+      lastInjectVia = 'tavernhelper';
+      log('已注入' + (reason ? '(' + reason + ')' : ''), content.length + '字', '[酒馆助手]');
+      return;
+    }
+
+    // 回退通道：ST 原生 setExtensionPrompt
+    if (injectViaNative(content, depth)) {
+      injected = true;
+      if (HEALTH.inject) HEALTH.inject.kind = 'fallback';
+      lastInjectVia = 'native';
+      log('已注入' + (reason ? '(' + reason + ')' : ''), content.length + '字', '[ST原生兜底]');
+      return;
+    }
+
+    // 两条路都不通
+    if (HEALTH.inject) HEALTH.inject.kind = 'missing';
+    lastInjectVia = '';
+    log('注入不可用，跳过（酒馆助手与 ST 原生通道均缺失）');
   } catch (e) {
     log('注入失败', e && e.message);
   }
@@ -345,6 +434,11 @@ function exposeApi() {
       inject: () => doInject('API'),
       push: (force) => pushState(!!force),
       reload: () => getEngine(true),
+      // 运行时自检：在浏览器 Console 里敲 personaEngine.health() 即可看到每一项软依赖状态
+      health: () => probeRuntime(),
+      healthLine: () => healthLine(),
+      probe: () => probeRuntime(),
+      injectVia: () => lastInjectVia,
       EXTENSION_ID,
       CARD_OVERRIDE_KEY,
       version: '0.1.0',
@@ -391,6 +485,9 @@ export function init() {
   registerCommands();
   exposeApi();
 
+  // 运行时自检：探测所有软依赖，把结果摊开给用户看（不再静默跳过）
+  probeRuntime();
+
   try {
     getEngine(true);
     doInject('启动');
@@ -398,6 +495,11 @@ export function init() {
   } catch (e) {
     log('启动注入失败', e && e.message);
   }
+
+  // 启动回执：手机上看不到 Console，所以用 toast 把「到底哪条链路活了」直接顶到脸上
+  const hl = healthLine();
+  toast('人格引擎已启动 · ' + hl, '人格引擎');
+  log('健康检查', hl, '| 注入通道:', lastInjectVia || '(未注入)');
   log('启动完成。');
 }
 

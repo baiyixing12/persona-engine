@@ -893,31 +893,91 @@ function getEngine(force) {
   }
   return engine;
 }
+var HEALTH = {};
+function setHealth(key, kind, note) {
+  HEALTH[key] = { kind, note: note || "", at: Date.now() };
+}
+function probeRuntime() {
+  if (typeof injectPrompts === "function") {
+    setHealth("inject", "ok", "injectPrompts @ \u9152\u9986\u52A9\u624B");
+  } else if (typeof SillyTavern !== "undefined" && SillyTavern.getContext) {
+    try {
+      const c = SillyTavern.getContext();
+      if (c && typeof c.setExtensionPrompt === "function") setHealth("inject", "fallback", "ST \u539F\u751F setExtensionPrompt");
+      else setHealth("inject", "missing", "\u4E24\u6761\u6CE8\u5165\u901A\u9053\u90FD\u4E0D\u53EF\u7528");
+    } catch (e) {
+      setHealth("inject", "missing", "\u63A2\u6D4B setExtensionPrompt \u51FA\u9519");
+    }
+  } else {
+    setHealth("inject", "missing", "injectPrompts \u4E0E SillyTavern \u5747\u4E0D\u53EF\u7528");
+  }
+  if (typeof eventOn === "function") setHealth("events", "ok", "eventOn @ \u9152\u9986\u52A9\u624B");
+  else if (typeof eventSource !== "undefined" && eventSource || getCtx() && getCtx().eventSource) setHealth("events", "ok", "eventSource.on @ ST");
+  else setHealth("events", "missing", "\u672A\u627E\u5230\u4E8B\u4EF6\u6E90");
+  if (typeof registerMacroLike === "function") setHealth("macros", "ok", "registerMacroLike @ \u9152\u9986\u52A9\u624B");
+  else setHealth("macros", "missing", "\u7F3A\u5C11 registerMacroLike\uFF08\u9700\u9152\u9986\u52A9\u624B\uFF09");
+  const _c = getCtx();
+  const _p = _c && _c.SlashCommandParser || typeof SillyTavern !== "undefined" && SillyTavern.SlashCommandParser;
+  if (_p && typeof _p.addCommandObject === "function") setHealth("commands", "ok", "SlashCommandParser @ ST");
+  else setHealth("commands", "missing", "\u7F3A\u5C11 SlashCommandParser");
+  if (globalThis.TavernHelper && typeof globalThis.TavernHelper.getVariables === "function") setHealth("vars", "ok", "TavernHelper.getVariables");
+  else setHealth("vars", "missing", "\u7F3A\u5C11 TavernHelper\uFF08\u53D8\u91CF\u65E0\u6CD5\u6301\u4E45\u5316\uFF09");
+  return HEALTH;
+}
+function healthLine() {
+  const mark = (k) => {
+    const h = HEALTH[k];
+    if (!h) return "\u2754";
+    return h.kind === "ok" ? "\u2705" : h.kind === "fallback" ? "\u{1F7E1}" : "\u274C";
+  };
+  return "\u6CE8\u5165" + mark("inject") + " \u4E8B\u4EF6" + mark("events") + " \u5B8F" + mark("macros") + " \u547D\u4EE4" + mark("commands") + " \u53D8\u91CF" + mark("vars");
+}
 var injected = false;
+var lastInjectVia = "";
+function injectViaNative(content, depth) {
+  try {
+    const c = getCtx();
+    if (!c || typeof c.setExtensionPrompt !== "function") return false;
+    c.setExtensionPrompt(PROMPT_ID, content, 1, depth);
+    return true;
+  } catch (e) {
+    return false;
+  }
+}
 function doInject(reason) {
   try {
     const e = getEngine();
     const p = e.profile || {};
     if (p.inject && p.inject.show === false) return;
-    if (typeof injectPrompts !== "function") {
-      log("injectPrompts \u4E0D\u53EF\u7528\uFF0C\u8DF3\u8FC7\u6CE8\u5165");
-      return;
-    }
     const content = e.inject();
-    if (injected && typeof uninjectPrompts === "function") {
-      try {
-        uninjectPrompts([PROMPT_ID]);
-      } catch (err) {
-      }
-    }
     const depth = p.inject && p.inject.depth || 4;
     const role = p.inject && p.inject.role || "system";
-    injectPrompts(
-      [{ id: PROMPT_ID, position: "in_chat", depth, role, content, should_scan: true }],
-      { once: false }
-    );
-    injected = true;
-    log("\u5DF2\u6CE8\u5165" + (reason ? "(" + reason + ")" : ""), content.length + "\u5B57");
+    if (typeof injectPrompts === "function") {
+      if (injected && typeof uninjectPrompts === "function") {
+        try {
+          uninjectPrompts([PROMPT_ID]);
+        } catch (err) {
+        }
+      }
+      injectPrompts(
+        [{ id: PROMPT_ID, position: "in_chat", depth, role, content, should_scan: true }],
+        { once: false }
+      );
+      injected = true;
+      lastInjectVia = "tavernhelper";
+      log("\u5DF2\u6CE8\u5165" + (reason ? "(" + reason + ")" : ""), content.length + "\u5B57", "[\u9152\u9986\u52A9\u624B]");
+      return;
+    }
+    if (injectViaNative(content, depth)) {
+      injected = true;
+      if (HEALTH.inject) HEALTH.inject.kind = "fallback";
+      lastInjectVia = "native";
+      log("\u5DF2\u6CE8\u5165" + (reason ? "(" + reason + ")" : ""), content.length + "\u5B57", "[ST\u539F\u751F\u515C\u5E95]");
+      return;
+    }
+    if (HEALTH.inject) HEALTH.inject.kind = "missing";
+    lastInjectVia = "";
+    log("\u6CE8\u5165\u4E0D\u53EF\u7528\uFF0C\u8DF3\u8FC7\uFF08\u9152\u9986\u52A9\u624B\u4E0E ST \u539F\u751F\u901A\u9053\u5747\u7F3A\u5931\uFF09");
   } catch (e) {
     log("\u6CE8\u5165\u5931\u8D25", e && e.message);
   }
@@ -1123,6 +1183,11 @@ function exposeApi() {
       inject: () => doInject("API"),
       push: (force) => pushState(!!force),
       reload: () => getEngine(true),
+      // 运行时自检：在浏览器 Console 里敲 personaEngine.health() 即可看到每一项软依赖状态
+      health: () => probeRuntime(),
+      healthLine: () => healthLine(),
+      probe: () => probeRuntime(),
+      injectVia: () => lastInjectVia,
       EXTENSION_ID,
       CARD_OVERRIDE_KEY,
       version: "0.1.0"
@@ -1163,6 +1228,7 @@ function init() {
   registerMacros();
   registerCommands();
   exposeApi();
+  probeRuntime();
   try {
     getEngine(true);
     doInject("\u542F\u52A8");
@@ -1170,6 +1236,9 @@ function init() {
   } catch (e) {
     log("\u542F\u52A8\u6CE8\u5165\u5931\u8D25", e && e.message);
   }
+  const hl = healthLine();
+  toast("\u4EBA\u683C\u5F15\u64CE\u5DF2\u542F\u52A8 \xB7 " + hl, "\u4EBA\u683C\u5F15\u64CE");
+  log("\u5065\u5EB7\u68C0\u67E5", hl, "| \u6CE8\u5165\u901A\u9053:", lastInjectVia || "(\u672A\u6CE8\u5165)");
   log("\u542F\u52A8\u5B8C\u6210\u3002");
 }
 var integration_default = { init };
