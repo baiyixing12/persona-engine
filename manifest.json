@@ -8,9 +8,9 @@
     "activate": "init"
   },
   "author": "baiyixing12",
-  "version": "0.3.0",
+  "version": "0.3.1",
   "homePage": "https://github.com/baiyixing12/persona-engine",
-  "auto_update": true,
+  "auto_update": false,
   "minimum_client_version": "1.12.13"
 }
 

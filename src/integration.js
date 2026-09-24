@@ -13,6 +13,7 @@
  */
 
 import { createEngine } from './engine.js';
+import { ENGINE_VERSION } from './defaults.js';
 import { resolveProfile, EXTENSION_ID, CARD_OVERRIDE_KEY } from './config.js';
 import { mountPanelWithRetry } from './ui.js';
 
@@ -609,7 +610,7 @@ function exposeApi() {
       snapshot: () => personaSnapshot(),
       EXTENSION_ID,
       CARD_OVERRIDE_KEY,
-      version: '0.3.0',
+      version: ENGINE_VERSION,
       panel: () => mountPanelWithRetry({
         probe: probeRuntime,
         healthLine,

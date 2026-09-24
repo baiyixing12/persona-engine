@@ -22,7 +22,7 @@
  * 叫用户「哥哥」或提到某部作品。角色卡想改，就在卡内变量里覆盖对应 key。
  */
 
-export const ENGINE_VERSION = '0.3.0';
+export const ENGINE_VERSION = '0.3.1';
 
 /* 一个中性的小事件集。角色卡可以通过覆盖 profile.events 整体替换。 */
 export const DEFAULT_EVENTS = [
@@ -116,9 +116,11 @@ export const DEFAULT_PROFILE = {
 
   /* ---------- 数值分带词（afText 用） ---------- */
   labels: {
-    valence: { warm: 0.25, cold: -0.25 },
-    arousal: { tense: 0.65, relaxed: 0.3 },
-    safety: { safe: 0.6, unsafe: 0.35 },
+    /* 分带表：高阈值名 / 低阈值名 / 中间中性名（neutral）。
+       neutral 可省略，省略则中间带输出空串。 */
+    valence: { warm: 0.25, cold: -0.25, neutral: '平静' },
+    arousal: { tense: 0.65, relaxed: 0.3, neutral: '平稳' },
+    safety: { safe: 0.6, unsafe: 0.35, neutral: '尚可' },
   },
 
   /* ---------- 事件 → 情绪基准 ---------- */
@@ -274,6 +276,14 @@ export const DEFAULT_PROFILE = {
   },
 
   /* ---------- 数值范围 ---------- */
+  /* ---------- 初始姿态（reset() 读它；角色卡可覆盖）---------- */
+  initial: {
+    /* 七维起点：中性略偏稳，不预设任何情绪基调。
+       v>=-0.25 不为 cold；s>=0.35 不为 unsafe。 */
+    af: { v: 0.15, a: 0.25, s: 0.5, u: 0.35, c: 0.2, ct: 0.3, bc: 0.3 },
+    self: { esteem: 0.3, efficacy: 0.3, coherence: 0.5 },
+  },
+
   bounds: { low: 0, high: 10, initial: 5 },
 
   /* ---------- MVU 桥（默认关） ---------- */

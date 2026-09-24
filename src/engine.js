@@ -144,8 +144,25 @@ export class PersonaEngine {
   }
 
   reset() {
-    this.af = { v: 0.05, a: 0.25, s: 0.35, u: 0.4, c: 0.2, ct: 0.3, bc: 0.3 };
-    this.self = { esteem: 0.3, efficacy: 0.3, coherence: 0.5 };
+    /* 初始姿态：从 profile.initial 读，角色卡可覆盖 —— 缺省为中性偏稳。
+       刻意不写死数值，保证「换一张卡就换一套起点」。 */
+    const I = this.profile.initial || {};
+    const af = I.af || {};
+    const sf = I.self || {};
+    this.af = {
+      v: num(af.v, 0.15),   // valence 情绪效价（0.15 落「中性」带，不再一上来就 cold）
+      a: num(af.a, 0.25),   // arousal 张力（<0.3 → relaxed）
+      s: num(af.s, 0.5),    // safety 安全感（>=0.35 → 不再是 unsafe）
+      u: num(af.u, 0.35),   // uncertainty 不确定
+      c: num(af.c, 0.2),    // connection 连接
+      ct: num(af.ct, 0.3),  // attach 依恋
+      bc: num(af.bc, 0.3)   // boundary-comfort 边界舒适
+    };
+    this.self = {
+      esteem: num(sf.esteem, 0.3),
+      efficacy: num(sf.efficacy, 0.3),
+      coherence: num(sf.coherence, 0.5)
+    };
     this.memories = [];
     this.beliefs = [];
     this.patterns = [];
@@ -519,9 +536,9 @@ export class PersonaEngine {
   afText() {
     const a = this.af;
     const L = this.profile.labels || {};
-    const vd = pickBand(a.v, L.valence || { warm: 0.25, cold: -0.25 });
-    const ad = pickBand(a.a, L.arousal || { tense: 0.65, relaxed: 0.3 });
-    const sd = pickBand(a.s, L.safety || { safe: 0.6, unsafe: 0.35 });
+    const vd = pickBand(a.v, L.valence || { warm: 0.25, cold: -0.25, neutral: '平静' });
+    const ad = pickBand(a.a, L.arousal || { tense: 0.65, relaxed: 0.3, neutral: '平稳' });
+    const sd = pickBand(a.s, L.safety || { safe: 0.6, unsafe: 0.35, neutral: '尚可' });
     const f = this.profile.afText || {};
     const seg = f.segments || ['心情', '张力', '安全感', '连接', '边界舒适', '不确定'];
     return `${seg[0]}:${vd} ${seg[1]}:${ad} ${seg[2]}:${sd} ${seg[3]}:${a.ct.toFixed(2)} ${seg[4]}:${a.bc.toFixed(2)} ${seg[5]}:${a.u.toFixed(2)}`;
@@ -584,11 +601,27 @@ export class PersonaEngine {
 }
 
 /* 取某个数值落在哪个标签带 */
+/** 数值兜底：非有限数则用默认值 */
+function num(v, d) {
+  return typeof v === 'number' && isFinite(v) ? v : d;
+}
+
 function pickBand(v, table) {
-  const entries = Object.entries(table);
-  const hi = entries.filter(([, t]) => typeof t === 'number' && v >= t).sort((a, b) => b[1] - a[1])[0];
-  const lo = entries.filter(([, t]) => typeof t === 'number' && v < t).sort((a, b) => a[1] - b[1])[0];
-  return (hi && hi[0]) || (lo && lo[0]) || '';
+  /* 分带语义：一张表里通常有两个方向名（如 {warm:0.25, cold:-0.25}），
+     value 较大的是「高方向」、较小的是「低方向」，两者阈值之间是中性带。
+     - v >= 高阈值  -> 高方向名
+     - v <  低阈值  -> 低方向名
+     - 中间地带     -> 返回中性名（table.neutral，无则空串）
+     兼容旧写法：只有一个方向名时，按该方向阈值切分。 */
+  const entries = Object.entries(table).filter(([, t]) => typeof t === 'number');
+  if (!entries.length) return table.neutral || '';
+  entries.sort((a, b) => b[1] - a[1]);           // 高阈值在前
+  const hi = entries[0];
+  const lo = entries[entries.length - 1];
+  if (entries.length === 1) return v >= hi[1] ? hi[0] : (table.neutral || lo[0]);
+  if (v >= hi[1]) return hi[0];                   // 高于高阈值 -> 高方向
+  if (v < lo[1]) return lo[0];                    // 低于低阈值 -> 低方向
+  return table.neutral || '';                     // 中性带
 }
 
 /**

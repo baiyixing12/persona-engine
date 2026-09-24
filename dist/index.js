@@ -1,5 +1,5 @@
 // src/defaults.js
-var ENGINE_VERSION = "0.3.0";
+var ENGINE_VERSION = "0.3.1";
 var DEFAULT_EVENTS = [
   // 注意：`抱` 必须排除「抱歉」，否则任何道歉都会被误判成亲密（中文子串陷阱）。
   { id: "intimate", pattern: "\u62E5\u62B1|(?:\u62B1)(?!\u6B49)|\u7275\u624B|\u9760\u7740|\u8D34\u8FD1|\u4F9D\u504E", z: 0.75, effect: { valence: 0.35, arousal: 0.15 } },
@@ -78,9 +78,11 @@ var DEFAULT_PROFILE = {
   },
   /* ---------- 数值分带词（afText 用） ---------- */
   labels: {
-    valence: { warm: 0.25, cold: -0.25 },
-    arousal: { tense: 0.65, relaxed: 0.3 },
-    safety: { safe: 0.6, unsafe: 0.35 }
+    /* 分带表：高阈值名 / 低阈值名 / 中间中性名（neutral）。
+       neutral 可省略，省略则中间带输出空串。 */
+    valence: { warm: 0.25, cold: -0.25, neutral: "\u5E73\u9759" },
+    arousal: { tense: 0.65, relaxed: 0.3, neutral: "\u5E73\u7A33" },
+    safety: { safe: 0.6, unsafe: 0.35, neutral: "\u5C1A\u53EF" }
   },
   /* ---------- 事件 → 情绪基准 ---------- */
   feel: {
@@ -222,6 +224,13 @@ var DEFAULT_PROFILE = {
     show: ["labels", "summary"]
   },
   /* ---------- 数值范围 ---------- */
+  /* ---------- 初始姿态（reset() 读它；角色卡可覆盖）---------- */
+  initial: {
+    /* 七维起点：中性略偏稳，不预设任何情绪基调。
+       v>=-0.25 不为 cold；s>=0.35 不为 unsafe。 */
+    af: { v: 0.15, a: 0.25, s: 0.5, u: 0.35, c: 0.2, ct: 0.3, bc: 0.3 },
+    self: { esteem: 0.3, efficacy: 0.3, coherence: 0.5 }
+  },
   bounds: { low: 0, high: 10, initial: 5 },
   /* ---------- MVU 桥（默认关） ---------- */
   mvu: { enabled: false, path: "persona_engine" }
@@ -378,8 +387,30 @@ var PersonaEngine = class {
     return { char: this.meta.name || this.profile.meta?.name || "\u5979", user: this.meta.user || "\u4F60" };
   }
   reset() {
-    this.af = { v: 0.05, a: 0.25, s: 0.35, u: 0.4, c: 0.2, ct: 0.3, bc: 0.3 };
-    this.self = { esteem: 0.3, efficacy: 0.3, coherence: 0.5 };
+    const I = this.profile.initial || {};
+    const af = I.af || {};
+    const sf = I.self || {};
+    this.af = {
+      v: num(af.v, 0.15),
+      // valence 情绪效价（0.15 落「中性」带，不再一上来就 cold）
+      a: num(af.a, 0.25),
+      // arousal 张力（<0.3 → relaxed）
+      s: num(af.s, 0.5),
+      // safety 安全感（>=0.35 → 不再是 unsafe）
+      u: num(af.u, 0.35),
+      // uncertainty 不确定
+      c: num(af.c, 0.2),
+      // connection 连接
+      ct: num(af.ct, 0.3),
+      // attach 依恋
+      bc: num(af.bc, 0.3)
+      // boundary-comfort 边界舒适
+    };
+    this.self = {
+      esteem: num(sf.esteem, 0.3),
+      efficacy: num(sf.efficacy, 0.3),
+      coherence: num(sf.coherence, 0.5)
+    };
     this.memories = [];
     this.beliefs = [];
     this.patterns = [];
@@ -729,9 +760,9 @@ var PersonaEngine = class {
   afText() {
     const a = this.af;
     const L = this.profile.labels || {};
-    const vd = pickBand(a.v, L.valence || { warm: 0.25, cold: -0.25 });
-    const ad = pickBand(a.a, L.arousal || { tense: 0.65, relaxed: 0.3 });
-    const sd = pickBand(a.s, L.safety || { safe: 0.6, unsafe: 0.35 });
+    const vd = pickBand(a.v, L.valence || { warm: 0.25, cold: -0.25, neutral: "\u5E73\u9759" });
+    const ad = pickBand(a.a, L.arousal || { tense: 0.65, relaxed: 0.3, neutral: "\u5E73\u7A33" });
+    const sd = pickBand(a.s, L.safety || { safe: 0.6, unsafe: 0.35, neutral: "\u5C1A\u53EF" });
     const f = this.profile.afText || {};
     const seg = f.segments || ["\u5FC3\u60C5", "\u5F20\u529B", "\u5B89\u5168\u611F", "\u8FDE\u63A5", "\u8FB9\u754C\u8212\u9002", "\u4E0D\u786E\u5B9A"];
     return `${seg[0]}:${vd} ${seg[1]}:${ad} ${seg[2]}:${sd} ${seg[3]}:${a.ct.toFixed(2)} ${seg[4]}:${a.bc.toFixed(2)} ${seg[5]}:${a.u.toFixed(2)}`;
@@ -786,11 +817,19 @@ var PersonaEngine = class {
     return head + d + tail;
   }
 };
+function num(v, d) {
+  return typeof v === "number" && isFinite(v) ? v : d;
+}
 function pickBand(v, table) {
-  const entries = Object.entries(table);
-  const hi = entries.filter(([, t]) => typeof t === "number" && v >= t).sort((a, b) => b[1] - a[1])[0];
-  const lo = entries.filter(([, t]) => typeof t === "number" && v < t).sort((a, b) => a[1] - b[1])[0];
-  return hi && hi[0] || lo && lo[0] || "";
+  const entries = Object.entries(table).filter(([, t]) => typeof t === "number");
+  if (!entries.length) return table.neutral || "";
+  entries.sort((a, b) => b[1] - a[1]);
+  const hi = entries[0];
+  const lo = entries[entries.length - 1];
+  if (entries.length === 1) return v >= hi[1] ? hi[0] : table.neutral || lo[0];
+  if (v >= hi[1]) return hi[0];
+  if (v < lo[1]) return lo[0];
+  return table.neutral || "";
 }
 function evalCmp(r, a) {
   const m = /^\s*([a-z]+)\s*(<=|>=|<|>)\s*(-?\d*\.?\d+)\s*(?:&&\s*([a-z]+)\s*(<=|>=|<|>)\s*(-?\d*\.?\d+))?\s*$/.exec(r.cmp || "");
@@ -872,9 +911,9 @@ function dimBar(label, val, delta) {
   const pct = Math.max(0, Math.min(1, typeof val === "number" ? val : 0));
   fill.style.width = (pct * 100).toFixed(1) + "%";
   track.appendChild(fill);
-  const num = document.createElement("span");
-  num.className = "pe-dimval";
-  num.textContent = typeof val === "number" ? val.toFixed(2) : "\u2014";
+  const num2 = document.createElement("span");
+  num2.className = "pe-dimval";
+  num2.textContent = typeof val === "number" ? val.toFixed(2) : "\u2014";
   const dn = document.createElement("span");
   dn.className = "pe-delta";
   if (typeof delta === "number" && Math.abs(delta) >= 5e-3) {
@@ -887,7 +926,7 @@ function dimBar(label, val, delta) {
   }
   row.appendChild(name);
   row.appendChild(track);
-  row.appendChild(num);
+  row.appendChild(num2);
   row.appendChild(dn);
   return row;
 }
@@ -1622,7 +1661,7 @@ function exposeApi() {
       snapshot: () => personaSnapshot(),
       EXTENSION_ID,
       CARD_OVERRIDE_KEY,
-      version: "0.3.0",
+      version: ENGINE_VERSION,
       panel: () => mountPanelWithRetry({
         probe: probeRuntime,
         healthLine,
