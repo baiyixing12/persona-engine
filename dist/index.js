@@ -1,5 +1,5 @@
 // src/defaults.js
-var ENGINE_VERSION = "0.1.0";
+var ENGINE_VERSION = "0.2.0";
 var DEFAULT_EVENTS = [
   // 注意：`抱` 必须排除「抱歉」，否则任何道歉都会被误判成亲密（中文子串陷阱）。
   { id: "intimate", pattern: "\u62E5\u62B1|(?:\u62B1)(?!\u6B49)|\u7275\u624B|\u9760\u7740|\u8D34\u8FD1|\u4F9D\u504E", z: 0.75, effect: { valence: 0.35, arousal: 0.15 } },
@@ -816,12 +816,178 @@ function createEngine(cid, opts = {}) {
   return e;
 }
 
-// src/integration.js
+// src/ui.js
 var LOGTAG = "[\u4EBA\u683C\u5F15\u64CE]";
-var PROMPT_ID = "persona_engine_inject";
+var PANEL_ID = "persona_engine_panel";
 function log(...a) {
   try {
     console.log.apply(console, [LOGTAG].concat([].slice.call(a)));
+  } catch (e) {
+  }
+}
+function findSettingsHost() {
+  if (typeof document === "undefined") return null;
+  return document.querySelector("#extensions_settings2") || document.querySelector("#extensions_settings") || null;
+}
+function healthView(kind) {
+  if (kind === "ok") return { icon: "\u2705", text: "\u6B63\u5E38", cls: "pe-ok" };
+  if (kind === "fallback") return { icon: "\u{1F7E1}", text: "\u964D\u7EA7", cls: "pe-warn" };
+  if (kind === "missing") return { icon: "\u274C", text: "\u7F3A\u5931", cls: "pe-bad" };
+  return { icon: "\u2754", text: "\u672A\u77E5", cls: "pe-unknown" };
+}
+var ROW_LABELS = {
+  inject: "\u63D0\u793A\u6CE8\u5165",
+  events: "\u4E8B\u4EF6\u76D1\u542C",
+  macros: "\u52A9\u624B\u5B8F",
+  commands: "\u659C\u6760\u547D\u4EE4",
+  vars: "\u53D8\u91CF\u901A\u9053"
+};
+function injectStyles() {
+  if (typeof document === "undefined") return;
+  if (document.getElementById(PANEL_ID + "_style")) return;
+  const style = document.createElement("style");
+  style.id = PANEL_ID + "_style";
+  style.textContent = [
+    "#" + PANEL_ID + "{margin-top:6px;}",
+    "#" + PANEL_ID + " .pe-row{display:flex;align-items:center;gap:6px;font-size:0.86em;line-height:1.5;}",
+    "#" + PANEL_ID + " .pe-row .pe-name{min-width:5em;opacity:.85;}",
+    "#" + PANEL_ID + " .pe-row .pe-note{opacity:.6;font-size:0.92em;}",
+    "#" + PANEL_ID + " .pe-sum{margin:4px 0;font-size:0.9em;opacity:.9;}",
+    "#" + PANEL_ID + " .pe-btns{display:flex;gap:6px;flex-wrap:wrap;margin-top:6px;}",
+    "#" + PANEL_ID + " button{margin:0;}"
+  ].join("");
+  document.head.appendChild(style);
+}
+function renderPanel(root, deps) {
+  const { probe, healthLine: healthLine2, injectVia, refresh, forceInject, reset } = deps;
+  let health = {};
+  let line = "";
+  let via = "";
+  try {
+    health = probe ? probe() || {} : {};
+  } catch (e) {
+  }
+  try {
+    line = healthLine2 ? healthLine2() : "";
+  } catch (e) {
+  }
+  try {
+    via = injectVia ? injectVia() : "";
+  } catch (e) {
+  }
+  root.textContent = "";
+  const title = document.createElement("div");
+  title.className = "pe-sum";
+  const b = document.createElement("b");
+  b.textContent = "\u72B6\u6001\u81EA\u68C0";
+  title.appendChild(b);
+  title.appendChild(document.createTextNode(" \xB7 " + (line || "(\u672A\u63A2\u6D4B)")));
+  root.appendChild(title);
+  for (const key of Object.keys(ROW_LABELS)) {
+    const h = health[key];
+    const v = healthView(h && h.kind);
+    const row = document.createElement("div");
+    row.className = "pe-row " + v.cls;
+    const name = document.createElement("span");
+    name.className = "pe-name";
+    name.textContent = ROW_LABELS[key];
+    const icon = document.createElement("span");
+    icon.textContent = v.icon + " " + v.text;
+    const note = document.createElement("span");
+    note.className = "pe-note";
+    note.textContent = h && h.note || "";
+    row.appendChild(name);
+    row.appendChild(icon);
+    row.appendChild(note);
+    root.appendChild(row);
+  }
+  const viaRow = document.createElement("div");
+  viaRow.className = "pe-sum";
+  viaRow.textContent = "\u6CE8\u5165\u901A\u9053\uFF1A" + (via || "(\u672A\u6CE8\u5165)");
+  root.appendChild(viaRow);
+  const btns = document.createElement("div");
+  btns.className = "pe-btns";
+  const mkBtn = (label, fn) => {
+    const btn = document.createElement("button");
+    btn.type = "button";
+    btn.className = "menu_button";
+    btn.textContent = label;
+    btn.addEventListener("click", () => {
+      try {
+        fn && fn();
+      } catch (e) {
+        log("\u9762\u677F\u64CD\u4F5C\u5931\u8D25 " + label, e && e.message);
+      }
+      renderPanel(root, deps);
+    });
+    return btn;
+  };
+  btns.appendChild(mkBtn("\u91CD\u65B0\u68C0\u6D4B", () => {
+  }));
+  if (refresh) btns.appendChild(mkBtn("\u91CD\u8F7D\u914D\u7F6E", refresh));
+  if (forceInject) btns.appendChild(mkBtn("\u5F3A\u5236\u6CE8\u5165", forceInject));
+  if (reset) btns.appendChild(mkBtn("\u91CD\u7F6E\u72B6\u6001", reset));
+  root.appendChild(btns);
+}
+function mountPanel(deps = {}) {
+  try {
+    injectStyles();
+    const host = findSettingsHost();
+    if (!host) {
+      log("\u672A\u627E\u5230\u6269\u5C55\u8BBE\u7F6E\u5BB9\u5668\uFF0C\u9762\u677F\u8DF3\u8FC7\uFF08\u4E0D\u5F71\u54CD\u5F15\u64CE\uFF09");
+      return false;
+    }
+    let root = document.getElementById(PANEL_ID);
+    if (!root) {
+      const details = document.createElement("div");
+      details.className = "extension_container";
+      details.id = PANEL_ID;
+      const header = document.createElement("div");
+      header.className = "inline-drawer";
+      const toggle = document.createElement("div");
+      toggle.className = "inline-drawer-toggle inline-drawer-header";
+      const hb = document.createElement("b");
+      hb.textContent = "\u4EBA\u683C\u5F15\u64CE";
+      toggle.appendChild(hb);
+      const bodyWrap = document.createElement("div");
+      bodyWrap.className = "inline-drawer-content";
+      const body2 = document.createElement("div");
+      body2.className = "pe-body";
+      bodyWrap.appendChild(body2);
+      toggle.addEventListener("click", () => {
+        details.classList.toggle("open");
+      });
+      header.appendChild(toggle);
+      header.appendChild(bodyWrap);
+      details.appendChild(header);
+      details.classList.add("open");
+      host.appendChild(details);
+      root = details;
+    }
+    const body = root.querySelector(".pe-body") || root;
+    renderPanel(body, deps);
+    log("\u8BBE\u7F6E\u9762\u677F\u5DF2\u6302\u8F7D");
+    return true;
+  } catch (e) {
+    log("\u6302\u8F7D\u8BBE\u7F6E\u9762\u677F\u5931\u8D25\uFF08\u4E0D\u5F71\u54CD\u5F15\u64CE\uFF09", e && e.message);
+    return false;
+  }
+}
+function mountPanelWithRetry(deps = {}, tries = 5, delayMs = 1200) {
+  if (mountPanel(deps)) return;
+  let n = 0;
+  const t = setInterval(() => {
+    n += 1;
+    if (mountPanel(deps) || n >= tries) clearInterval(t);
+  }, delayMs);
+}
+
+// src/integration.js
+var LOGTAG2 = "[\u4EBA\u683C\u5F15\u64CE]";
+var PROMPT_ID = "persona_engine_inject";
+function log2(...a) {
+  try {
+    console.log.apply(console, [LOGTAG2].concat([].slice.call(a)));
   } catch (e) {
   }
 }
@@ -829,9 +995,9 @@ function toast(msg, title) {
   try {
     if (typeof toastr !== "undefined") {
       toastr.info(String(msg), String(title || "\u4EBA\u683C\u5F15\u64CE"), { timeOut: 2200 });
-    } else log(msg);
+    } else log2(msg);
   } catch (e) {
-    log(msg);
+    log2(msg);
   }
 }
 function getCtx() {
@@ -877,7 +1043,7 @@ function getProfile(force) {
   try {
     cachedProfile = resolveProfile({});
   } catch (e) {
-    log("\u89E3\u6790 profile \u5931\u8D25\uFF0C\u9000\u56DE\u5185\u7F6E\u9ED8\u8BA4", e && e.message);
+    log2("\u89E3\u6790 profile \u5931\u8D25\uFF0C\u9000\u56DE\u5185\u7F6E\u9ED8\u8BA4", e && e.message);
     cachedProfile = null;
   }
   return cachedProfile;
@@ -965,21 +1131,21 @@ function doInject(reason) {
       );
       injected = true;
       lastInjectVia = "tavernhelper";
-      log("\u5DF2\u6CE8\u5165" + (reason ? "(" + reason + ")" : ""), content.length + "\u5B57", "[\u9152\u9986\u52A9\u624B]");
+      log2("\u5DF2\u6CE8\u5165" + (reason ? "(" + reason + ")" : ""), content.length + "\u5B57", "[\u9152\u9986\u52A9\u624B]");
       return;
     }
     if (injectViaNative(content, depth)) {
       injected = true;
       if (HEALTH.inject) HEALTH.inject.kind = "fallback";
       lastInjectVia = "native";
-      log("\u5DF2\u6CE8\u5165" + (reason ? "(" + reason + ")" : ""), content.length + "\u5B57", "[ST\u539F\u751F\u515C\u5E95]");
+      log2("\u5DF2\u6CE8\u5165" + (reason ? "(" + reason + ")" : ""), content.length + "\u5B57", "[ST\u539F\u751F\u515C\u5E95]");
       return;
     }
     if (HEALTH.inject) HEALTH.inject.kind = "missing";
     lastInjectVia = "";
-    log("\u6CE8\u5165\u4E0D\u53EF\u7528\uFF0C\u8DF3\u8FC7\uFF08\u9152\u9986\u52A9\u624B\u4E0E ST \u539F\u751F\u901A\u9053\u5747\u7F3A\u5931\uFF09");
+    log2("\u6CE8\u5165\u4E0D\u53EF\u7528\uFF0C\u8DF3\u8FC7\uFF08\u9152\u9986\u52A9\u624B\u4E0E ST \u539F\u751F\u901A\u9053\u5747\u7F3A\u5931\uFF09");
   } catch (e) {
-    log("\u6CE8\u5165\u5931\u8D25", e && e.message);
+    log2("\u6CE8\u5165\u5931\u8D25", e && e.message);
   }
 }
 function onEvent(name, fn) {
@@ -994,7 +1160,7 @@ function onEvent(name, fn) {
       return true;
     }
   } catch (e) {
-    log("\u7ED1\u5B9A\u4E8B\u4EF6\u5931\u8D25 " + name, e && e.message);
+    log2("\u7ED1\u5B9A\u4E8B\u4EF6\u5931\u8D25 " + name, e && e.message);
   }
   return false;
 }
@@ -1035,7 +1201,7 @@ function onMsg(id, type) {
     const p = e.profile || {};
     if (p.toast_on_evolve) toast(p.meta && p.meta.name || "\u4EBA\u683C \xB7 " + e.mood());
   } catch (e) {
-    log("evolve \u5931\u8D25", e && e.stack || e && e.message);
+    log2("evolve \u5931\u8D25", e && e.stack || e && e.message);
   }
 }
 var lastPush = "";
@@ -1067,7 +1233,7 @@ function pushState(force) {
       return true;
     }
   } catch (e) {
-    log("\u56DE\u5199\u72B6\u6001\u5931\u8D25", e && e.message);
+    log2("\u56DE\u5199\u72B6\u6001\u5931\u8D25", e && e.message);
   }
   return false;
 }
@@ -1101,11 +1267,11 @@ function registerMacros() {
         ok = true;
       }
     } catch (e) {
-      log("\u6CE8\u518C\u5B8F\u5931\u8D25 " + key, e && e.message);
+      log2("\u6CE8\u518C\u5B8F\u5931\u8D25 " + key, e && e.message);
     }
     if (ok) registered.push(key);
   }
-  if (registered.length) log("\u5DF2\u6CE8\u518C\u52A9\u624B\u5B8F", registered.join(","));
+  if (registered.length) log2("\u5DF2\u6CE8\u518C\u52A9\u624B\u5B8F", registered.join(","));
 }
 var FOOT = "\u4EBA\u683C\u5F15\u64CE";
 var CMDS = [
@@ -1137,7 +1303,7 @@ function registerCommands() {
   const SC = ctx && ctx.SlashCommand || typeof SillyTavern !== "undefined" && SillyTavern.SlashCommand;
   const Arg = ctx && ctx.SlashCommandArgument || typeof SillyTavern !== "undefined" && SillyTavern.SlashCommandArgument;
   if (!Parser || !SC || typeof Parser.addCommandObject !== "function") {
-    log("SlashCommandParser \u4E0D\u53EF\u7528\uFF0C\u8DF3\u8FC7\u659C\u6760\u547D\u4EE4\u6CE8\u518C");
+    log2("SlashCommandParser \u4E0D\u53EF\u7528\uFF0C\u8DF3\u8FC7\u659C\u6760\u547D\u4EE4\u6CE8\u518C");
     return;
   }
   for (const c of CMDS) {
@@ -1153,7 +1319,7 @@ function registerCommands() {
             const out = run(getEngine());
             return out === void 0 || out === null ? "" : String(out);
           } catch (e) {
-            log("\u659C\u6760 " + key + " \u51FA\u9519", e && e.message);
+            log2("\u659C\u6760 " + key + " \u51FA\u9519", e && e.message);
             return "";
           }
         }
@@ -1161,10 +1327,10 @@ function registerCommands() {
       if (Arg && Arg.fromProps) props.returns = Arg.fromProps({ description: desc, type: "string" });
       Parser.addCommandObject(SC.fromProps(props));
     } catch (e) {
-      log("\u6CE8\u518C\u659C\u6760 " + key + " \u5931\u8D25", e && e.message);
+      log2("\u6CE8\u518C\u659C\u6760 " + key + " \u5931\u8D25", e && e.message);
     }
   }
-  log("\u5DF2\u6CE8\u518C\u659C\u6760\u547D\u4EE4", CMDS.map((c) => "/" + c[0]).join(" "));
+  log2("\u5DF2\u6CE8\u518C\u659C\u6760\u547D\u4EE4", CMDS.map((c) => "/" + c[0]).join(" "));
 }
 function exposeApi() {
   try {
@@ -1190,16 +1356,17 @@ function exposeApi() {
       injectVia: () => lastInjectVia,
       EXTENSION_ID,
       CARD_OVERRIDE_KEY,
-      version: "0.1.0"
+      version: "0.2.0",
+      panel: () => mountPanelWithRetry({ probe: probeRuntime, healthLine, injectVia: () => lastInjectVia })
     };
   } catch (e) {
-    log("\u5BFC\u51FA API \u5931\u8D25", e && e.message);
+    log2("\u5BFC\u51FA API \u5931\u8D25", e && e.message);
   }
 }
 function init() {
   const root = typeof window !== "undefined" ? window : typeof globalThis !== "undefined" ? globalThis : {};
   if (root.__persona_engine_booted) {
-    log("\u5DF2\u542F\u52A8\uFF0C\u8DF3\u8FC7\u91CD\u590D\u521D\u59CB\u5316");
+    log2("\u5DF2\u542F\u52A8\uFF0C\u8DF3\u8FC7\u91CD\u590D\u521D\u59CB\u5316");
     return;
   }
   root.__persona_engine_booted = true;
@@ -1212,7 +1379,7 @@ function init() {
       getEngine(true);
       doInject("\u5207\u6362\u804A\u5929");
     } catch (e) {
-      log("\u5207\u6362\u804A\u5929\u91CD\u6CE8\u5165\u5931\u8D25", e && e.message);
+      log2("\u5207\u6362\u804A\u5929\u91CD\u6CE8\u5165\u5931\u8D25", e && e.message);
     }
   };
   onEvent("chat_id_changed", onChatChange);
@@ -1234,12 +1401,35 @@ function init() {
     doInject("\u542F\u52A8");
     pushState(true);
   } catch (e) {
-    log("\u542F\u52A8\u6CE8\u5165\u5931\u8D25", e && e.message);
+    log2("\u542F\u52A8\u6CE8\u5165\u5931\u8D25", e && e.message);
   }
   const hl = healthLine();
   toast("\u4EBA\u683C\u5F15\u64CE\u5DF2\u542F\u52A8 \xB7 " + hl, "\u4EBA\u683C\u5F15\u64CE");
-  log("\u5065\u5EB7\u68C0\u67E5", hl, "| \u6CE8\u5165\u901A\u9053:", lastInjectVia || "(\u672A\u6CE8\u5165)");
-  log("\u542F\u52A8\u5B8C\u6210\u3002");
+  log2("\u5065\u5EB7\u68C0\u67E5", hl, "| \u6CE8\u5165\u901A\u9053:", lastInjectVia || "(\u672A\u6CE8\u5165)");
+  mountPanelWithRetry({
+    probe: probeRuntime,
+    healthLine,
+    injectVia: () => lastInjectVia,
+    refresh: () => {
+      getEngine(true);
+      doInject("\u9762\u677F\u91CD\u8F7D");
+      pushState(true);
+      toast("\u914D\u7F6E\u5DF2\u91CD\u8F7D", "\u4EBA\u683C\u5F15\u64CE");
+    },
+    forceInject: () => {
+      injected = false;
+      doInject("\u9762\u677F\u5F3A\u5236\u6CE8\u5165");
+      toast("\u5DF2\u91CD\u65B0\u6CE8\u5165 \xB7 " + healthLine(), "\u4EBA\u683C\u5F15\u64CE");
+    },
+    reset: () => {
+      const e = getEngine();
+      e.reset();
+      doInject("\u9762\u677F\u91CD\u7F6E");
+      pushState(true);
+      toast("\u72B6\u6001\u5DF2\u91CD\u7F6E", "\u4EBA\u683C\u5F15\u64CE");
+    }
+  });
+  log2("\u542F\u52A8\u5B8C\u6210\u3002");
 }
 var integration_default = { init };
 export {

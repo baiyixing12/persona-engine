@@ -14,6 +14,7 @@
 
 import { createEngine } from './engine.js';
 import { resolveProfile, EXTENSION_ID, CARD_OVERRIDE_KEY } from './config.js';
+import { mountPanelWithRetry } from './ui.js';
 
 const LOGTAG = '[人格引擎]';
 const PROMPT_ID = 'persona_engine_inject';
@@ -441,7 +442,8 @@ function exposeApi() {
       injectVia: () => lastInjectVia,
       EXTENSION_ID,
       CARD_OVERRIDE_KEY,
-      version: '0.1.0',
+      version: '0.2.0',
+      panel: () => mountPanelWithRetry({ probe: probeRuntime, healthLine, injectVia: () => lastInjectVia }),
     };
   } catch (e) {
     log('导出 API 失败', e && e.message);
@@ -500,6 +502,32 @@ export function init() {
   const hl = healthLine();
   toast('人格引擎已启动 · ' + hl, '人格引擎');
   log('健康检查', hl, '| 注入通道:', lastInjectVia || '(未注入)');
+
+  // 扩展设置面板：把同一份自检结果显示到 Extensions 界面里（找不到容器会自动重试）
+  mountPanelWithRetry({
+    probe: probeRuntime,
+    healthLine,
+    injectVia: () => lastInjectVia,
+    refresh: () => {
+      getEngine(true);
+      doInject('面板重载');
+      pushState(true);
+      toast('配置已重载', '人格引擎');
+    },
+    forceInject: () => {
+      injected = false;
+      doInject('面板强制注入');
+      toast('已重新注入 · ' + healthLine(), '人格引擎');
+    },
+    reset: () => {
+      const e = getEngine();
+      e.reset();
+      doInject('面板重置');
+      pushState(true);
+      toast('状态已重置', '人格引擎');
+    },
+  });
+
   log('启动完成。');
 }
 
