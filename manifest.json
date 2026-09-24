@@ -1,0 +1,12 @@
+{
+  "display_name": "人格引擎",
+  "loading_order": 90,
+  "requires": ["JS-Slash-Runner"],
+  "optional": [],
+  "js": "dist/index.js",
+  "author": "baiyixing12",
+  "version": "0.1.0",
+  "homePage": "https://github.com/baiyixing12/persona-engine",
+  "auto_update": false,
+  "minimum_client_version": "1.12.13"
+}
