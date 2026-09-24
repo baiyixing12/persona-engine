@@ -842,6 +842,98 @@ var ROW_LABELS = {
   commands: "\u659C\u6760\u547D\u4EE4",
   vars: "\u53D8\u91CF\u901A\u9053"
 };
+var DIM_LABELS = [
+  ["v", "\u5FC3\u60C5"],
+  ["a", "\u5F20\u529B"],
+  ["s", "\u5B89\u5168\u611F"],
+  ["u", "\u4E0D\u786E\u5B9A"],
+  ["c", "\u4FE1\u4EFB"],
+  ["ct", "\u8FDE\u63A5"],
+  ["bc", "\u8FB9\u754C"]
+];
+var INTENT_LABELS = {
+  observe: "\u89C2\u5BDF",
+  approach: "\u9760\u8FD1",
+  withdraw: "\u62BD\u79BB",
+  probe: "\u8BD5\u63A2",
+  soothe: "\u5B89\u629A",
+  guard: "\u9632\u5FA1"
+};
+function dimBar(label, val, delta) {
+  const row = document.createElement("div");
+  row.className = "pe-dimrow";
+  const name = document.createElement("span");
+  name.className = "pe-dimname";
+  name.textContent = label;
+  const track = document.createElement("span");
+  track.className = "pe-track";
+  const fill = document.createElement("span");
+  fill.className = "pe-fill";
+  const pct = Math.max(0, Math.min(1, typeof val === "number" ? val : 0));
+  fill.style.width = (pct * 100).toFixed(1) + "%";
+  track.appendChild(fill);
+  const num = document.createElement("span");
+  num.className = "pe-dimval";
+  num.textContent = typeof val === "number" ? val.toFixed(2) : "\u2014";
+  const dn = document.createElement("span");
+  dn.className = "pe-delta";
+  if (typeof delta === "number" && Math.abs(delta) >= 5e-3) {
+    const up = delta > 0;
+    dn.textContent = (up ? "\u2191" : "\u2193") + Math.abs(delta).toFixed(2);
+    dn.classList.add(up ? "pe-up" : "pe-down");
+  } else {
+    dn.textContent = "\xB7";
+    dn.classList.add("pe-flat");
+  }
+  row.appendChild(name);
+  row.appendChild(track);
+  row.appendChild(num);
+  row.appendChild(dn);
+  return row;
+}
+function renderPersona(root, deps) {
+  const { snapshot } = deps;
+  let snap = null;
+  try {
+    snap = snapshot ? snapshot() : null;
+  } catch (e) {
+  }
+  const head = document.createElement("div");
+  head.className = "pe-sum pe-sec";
+  const hb = document.createElement("b");
+  hb.textContent = "\u4EBA\u683C\u72B6\u6001";
+  head.appendChild(hb);
+  if (!snap) {
+    head.appendChild(document.createTextNode(" \xB7 (\u5F15\u64CE\u672A\u5C31\u7EEA)"));
+    root.appendChild(head);
+    return;
+  }
+  head.appendChild(document.createTextNode(" \xB7 \u610F\u56FE " + (INTENT_LABELS[snap.intent] || snap.intent)));
+  root.appendChild(head);
+  const grid = document.createElement("div");
+  grid.className = "pe-grid";
+  const dims = snap.dims || {};
+  const delta = snap.delta || {};
+  for (const [k, label] of DIM_LABELS) {
+    grid.appendChild(dimBar(label, dims[k], delta[k]));
+  }
+  root.appendChild(grid);
+  const meta = document.createElement("div");
+  meta.className = "pe-row";
+  const bits = [];
+  if (snap.mood) bits.push("\u60C5\u7EEA\uFF1A" + snap.mood);
+  if (snap.goal) bits.push("\u76EE\u6807\uFF1A" + snap.goal);
+  bits.push("\u7ECF\u5386 ep=" + (snap.ep || 0));
+  bits.push("\u8BB0\u5FC6 " + (snap.memories || 0) + " / \u4FE1\u5FF5 " + (snap.beliefs || 0));
+  meta.textContent = bits.join(" \uFF5C ");
+  root.appendChild(meta);
+  if (!snap.delta) {
+    const hint = document.createElement("div");
+    hint.className = "pe-note";
+    hint.textContent = "\uFF08\u9996\u6B21\u5FEB\u7167\uFF0C\u6682\u65E0\u53D8\u5316\u91CF\uFF1B\u4E0B\u6B21\u5237\u65B0\u5373\u53EF\u770B\u5230 \u2191\u2193\uFF09";
+    root.appendChild(hint);
+  }
+}
 function injectStyles() {
   if (typeof document === "undefined") return;
   if (document.getElementById(PANEL_ID + "_style")) return;
@@ -854,15 +946,28 @@ function injectStyles() {
     "#" + PANEL_ID + " .pe-row .pe-note{opacity:.6;font-size:0.92em;}",
     "#" + PANEL_ID + " .pe-sum{margin:4px 0;font-size:0.9em;opacity:.9;}",
     "#" + PANEL_ID + " .pe-btns{display:flex;gap:6px;flex-wrap:wrap;margin-top:6px;}",
-    "#" + PANEL_ID + " button{margin:0;}"
+    "#" + PANEL_ID + " button{margin:0;}",
+    // 人格状态区
+    "#" + PANEL_ID + " .pe-sec{margin-top:8px;border-top:1px solid rgba(128,128,128,.25);padding-top:6px;}",
+    "#" + PANEL_ID + " .pe-grid{display:flex;flex-direction:column;gap:2px;margin:2px 0 4px;}",
+    "#" + PANEL_ID + " .pe-dimrow{display:flex;align-items:center;gap:6px;font-size:0.84em;line-height:1.4;}",
+    "#" + PANEL_ID + " .pe-dimname{min-width:3.2em;opacity:.85;}",
+    "#" + PANEL_ID + " .pe-track{flex:1;height:6px;border-radius:3px;background:rgba(128,128,128,.25);overflow:hidden;min-width:60px;}",
+    "#" + PANEL_ID + " .pe-fill{display:block;height:100%;border-radius:3px;background:#5a9bd5;}",
+    "#" + PANEL_ID + " .pe-dimval{min-width:2.4em;text-align:right;opacity:.9;font-variant-numeric:tabular-nums;}",
+    "#" + PANEL_ID + " .pe-delta{min-width:2.6em;text-align:right;font-size:0.95em;}",
+    "#" + PANEL_ID + " .pe-up{color:#57c07a;}",
+    "#" + PANEL_ID + " .pe-down{color:#e0736a;}",
+    "#" + PANEL_ID + " .pe-flat{opacity:.35;}"
   ].join("");
   document.head.appendChild(style);
 }
 function renderPanel(root, deps) {
-  const { probe, healthLine: healthLine2, injectVia, refresh, forceInject, reset } = deps;
+  const { probe, healthLine: healthLine2, injectVia, selfCheckLine: selfCheckLine2, refresh, forceInject, reset } = deps;
   let health = {};
   let line = "";
   let via = "";
+  let scline = "";
   try {
     health = probe ? probe() || {} : {};
   } catch (e) {
@@ -875,13 +980,17 @@ function renderPanel(root, deps) {
     via = injectVia ? injectVia() : "";
   } catch (e) {
   }
+  try {
+    scline = selfCheckLine2 ? selfCheckLine2() : "";
+  } catch (e) {
+  }
   root.textContent = "";
   const title = document.createElement("div");
   title.className = "pe-sum";
   const b = document.createElement("b");
   b.textContent = "\u72B6\u6001\u81EA\u68C0";
   title.appendChild(b);
-  title.appendChild(document.createTextNode(" \xB7 " + (line || "(\u672A\u63A2\u6D4B)")));
+  title.appendChild(document.createTextNode(" \xB7 " + (scline || line || "(\u672A\u63A2\u6D4B)")));
   root.appendChild(title);
   for (const key of Object.keys(ROW_LABELS)) {
     const h = health[key];
@@ -905,6 +1014,7 @@ function renderPanel(root, deps) {
   viaRow.className = "pe-sum";
   viaRow.textContent = "\u6CE8\u5165\u901A\u9053\uFF1A" + (via || "(\u672A\u6CE8\u5165)");
   root.appendChild(viaRow);
+  renderPersona(root, deps);
   const btns = document.createElement("div");
   btns.className = "pe-btns";
   const mkBtn = (label, fn) => {
@@ -1097,6 +1207,129 @@ function healthLine() {
     return h.kind === "ok" ? "\u2705" : h.kind === "fallback" ? "\u{1F7E1}" : "\u274C";
   };
   return "\u6CE8\u5165" + mark("inject") + " \u4E8B\u4EF6" + mark("events") + " \u5B8F" + mark("macros") + " \u547D\u4EE4" + mark("commands") + " \u53D8\u91CF" + mark("vars");
+}
+var lastSelfCheck = null;
+function selfCheck(silent) {
+  const strip = [];
+  const mark = (id, kind, note) => strip.push({ id, kind, note: note || "" });
+  const then = typeof performance !== "undefined" && performance.now ? performance.now() : Date.now();
+  const ms = () => {
+    const now = typeof performance !== "undefined" && performance.now ? performance.now() : Date.now();
+    return Math.max(0, Math.round(now - then));
+  };
+  try {
+    probeRuntime();
+  } catch (e) {
+    mark("probe", "fail", "\u63A2\u6D4B\u629B\u51FA\u5F02\u5E38\uFF1A" + (e && e.message));
+  }
+  const kindOf = (k) => HEALTH[k] && HEALTH[k].kind || "missing";
+  const dep = (k, label) => {
+    const kk = kindOf(k);
+    mark("dep:" + k, kk === "ok" ? "pass" : kk === "fallback" ? "warn" : "fail", label + " " + kk);
+  };
+  dep("inject", "\u63D0\u793A\u6CE8\u5165");
+  dep("events", "\u4E8B\u4EF6\u76D1\u542C");
+  dep("macros", "\u52A9\u624B\u5B8F");
+  dep("commands", "\u659C\u6760\u547D\u4EE4");
+  dep("vars", "\u53D8\u91CF\u901A\u9053");
+  let eng = null;
+  try {
+    eng = getEngine();
+    mark("engine", eng && eng.profile ? "pass" : "warn", eng ? "\u5F15\u64CE\u5DF2\u5B9E\u4F8B\u5316 cid=" + eng.cid : "\u5F15\u64CE\u4E3A\u7A7A");
+  } catch (e) {
+    mark("engine", "fail", "\u5B9E\u4F8B\u5316\u5931\u8D25\uFF1A" + (e && e.message));
+  }
+  try {
+    doInject("\u81EA\u68C0");
+    mark("inject-run", lastInjectVia ? "pass" : "fail", lastInjectVia ? "\u6CE8\u5165\u6210\u529F\u7ECF " + lastInjectVia : "\u4E24\u6761\u6CE8\u5165\u901A\u9053\u90FD\u4E0D\u901A");
+  } catch (e) {
+    mark("inject-run", "fail", "\u6CE8\u5165\u629B\u51FA\u5F02\u5E38\uFF1A" + (e && e.message));
+  }
+  try {
+    if (globalThis.TavernHelper && typeof globalThis.TavernHelper.insertOrAssignVariables === "function" && eng) {
+      globalThis.TavernHelper.insertOrAssignVariables({ [eng.key]: { __selfcheck: Date.now() } }, { type: "script" });
+      mark("vars-run", "pass", "\u53D8\u91CF\u53EF\u5199\uFF08TavernHelper\uFF09");
+    } else if (typeof localStorage !== "undefined") {
+      localStorage.setItem("persona_engine_selfcheck", String(Date.now()));
+      mark("vars-run", "warn", "\u9000\u56DE localStorage \u53EF\u5199");
+    } else {
+      mark("vars-run", "fail", "\u65E0\u53EF\u6301\u4E45\u5316\u901A\u9053");
+    }
+  } catch (e) {
+    mark("vars-run", "fail", "\u53D8\u91CF\u5199\u5165\u5931\u8D25\uFF1A" + (e && e.message));
+  }
+  try {
+    if (eng) {
+      const st = eng._storeRead && eng._storeRead();
+      mark("state-read", st ? "pass" : "warn", st ? "\u5DF2\u5B58\u4EBA\u683C\u53EF\u8BFB\u56DE" : "\u65E0\u5386\u53F2\u72B6\u6001\uFF08\u9996\u6B21\u8FD0\u884C\u6B63\u5E38\uFF09");
+    }
+  } catch (e) {
+    mark("state-read", "warn", "\u56DE\u8BFB\u5F02\u5E38\uFF1A" + (e && e.message));
+  }
+  const fails = strip.filter((s) => s.kind === "fail").length;
+  const warns = strip.filter((s) => s.kind === "warn").length;
+  lastSelfCheck = {
+    strip,
+    fails,
+    warns,
+    durationMs: ms(),
+    at: Date.now(),
+    via: lastInjectVia || "",
+    summary: fails === 0 && warns === 0 ? "\u5168\u90E8\u901A\u8FC7" : fails ? fails + " \u9879\u5F02\u5E38" : warns + " \u9879\u964D\u7EA7"
+  };
+  if (!silent) log2("\u5185\u90E8\u81EA\u68C0", lastSelfCheck.summary, lastSelfCheck.durationMs + "ms");
+  return lastSelfCheck;
+}
+function selfCheckLine() {
+  const s = lastSelfCheck || selfCheck(true);
+  const icon = s.fails ? "\u274C" : s.warns ? "\u{1F7E1}" : "\u2705";
+  return "\u81EA\u68C0" + icon + " " + s.summary + " \xB7 " + s.durationMs + "ms";
+}
+var prevSnapshot = null;
+function personaSnapshot() {
+  let eng = null;
+  try {
+    eng = getEngine();
+  } catch (e) {
+    return null;
+  }
+  if (!eng || !eng.af) return null;
+  const a = eng.af;
+  const dec = eng._dec || {};
+  const snap = {
+    dims: {
+      v: a.v,
+      a: a.a,
+      s: a.s,
+      u: a.u,
+      ct: a.ct,
+      bc: a.bc,
+      c: a.c
+    },
+    mood: (() => {
+      try {
+        return eng.mood();
+      } catch (e) {
+        return "";
+      }
+    })(),
+    intent: dec.intent || "observe",
+    goal: eng.goals && eng.goals[0] ? eng.goals[0].txt : "",
+    ep: eng.ep || 0,
+    memories: eng.memories && eng.memories.length || 0,
+    beliefs: eng.beliefs && eng.beliefs.length || 0,
+    at: Date.now()
+  };
+  const delta = {};
+  if (prevSnapshot) {
+    for (const k in snap.dims) {
+      delta[k] = snap.dims[k] - (prevSnapshot.dims[k] || 0);
+    }
+  }
+  snap.delta = prevSnapshot ? delta : null;
+  snap.prevAt = prevSnapshot ? prevSnapshot.at : null;
+  prevSnapshot = { dims: Object.assign({}, snap.dims), at: snap.at };
+  return snap;
 }
 var injected = false;
 var lastInjectVia = "";
@@ -1354,10 +1587,22 @@ function exposeApi() {
       healthLine: () => healthLine(),
       probe: () => probeRuntime(),
       injectVia: () => lastInjectVia,
+      // 内部自检：在 Console 里敲 personaEngine.selfCheck() 就能让扩展「自证活着」
+      selfCheck: (silent) => selfCheck(silent),
+      selfCheckLine: () => selfCheckLine(),
+      // 人格快照：直接读实时七维 + 情绪 + 倾向 + 目标，并给出与上一次的差值
+      snapshot: () => personaSnapshot(),
       EXTENSION_ID,
       CARD_OVERRIDE_KEY,
       version: "0.2.0",
-      panel: () => mountPanelWithRetry({ probe: probeRuntime, healthLine, injectVia: () => lastInjectVia })
+      panel: () => mountPanelWithRetry({
+        probe: probeRuntime,
+        healthLine,
+        injectVia: () => lastInjectVia,
+        selfCheck: (silent) => selfCheck(silent),
+        selfCheckLine: () => selfCheckLine(),
+        snapshot: () => personaSnapshot()
+      })
     };
   } catch (e) {
     log2("\u5BFC\u51FA API \u5931\u8D25", e && e.message);
@@ -1410,6 +1655,9 @@ function init() {
     probe: probeRuntime,
     healthLine,
     injectVia: () => lastInjectVia,
+    selfCheck: (silent) => selfCheck(silent),
+    selfCheckLine: () => selfCheckLine(),
+    snapshot: () => personaSnapshot(),
     refresh: () => {
       getEngine(true);
       doInject("\u9762\u677F\u91CD\u8F7D");

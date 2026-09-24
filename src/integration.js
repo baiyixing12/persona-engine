@@ -156,6 +156,145 @@ function healthLine() {
   return '注入' + mark('inject') + ' 事件' + mark('events') + ' 宏' + mark('macros') + ' 命令' + mark('commands') + ' 变量' + mark('vars');
 }
 
+/* ---------------- 内部自检（self-check） ----------------
+ * 目的：不用翻 Console、不用敲外部命令，扩展自己就能回答「我还活着吗」。
+ * selfCheck() 会真的动手跑一遍：探测软依赖 → 实例化引擎 → 读一次状态 → 试写一次变量。
+ * 结果缓存到 lastSelfCheck，供面板与 API 直接读。
+ * kind: 'pass' | 'warn' | 'fail'
+ */
+let lastSelfCheck = null;
+
+function selfCheck(silent) {
+  const strip = [];
+  const mark = (id, kind, note) => strip.push({ id, kind, note: note || '' });
+  const then = (typeof performance !== 'undefined' && performance.now) ? performance.now() : Date.now();
+  const ms = () => {
+    const now = (typeof performance !== 'undefined' && performance.now) ? performance.now() : Date.now();
+    return Math.max(0, Math.round(now - then));
+  };
+
+  // 1) 软依赖
+  try {
+    probeRuntime();
+  } catch (e) {
+    mark('probe', 'fail', '探测抛出异常：' + (e && e.message));
+  }
+  const kindOf = (k) => (HEALTH[k] && HEALTH[k].kind) || 'missing';
+  const dep = (k, label) => {
+    const kk = kindOf(k);
+    mark('dep:' + k, kk === 'ok' ? 'pass' : kk === 'fallback' ? 'warn' : 'fail', label + ' ' + kk);
+  };
+  dep('inject', '提示注入');
+  dep('events', '事件监听');
+  dep('macros', '助手宏');
+  dep('commands', '斜杠命令');
+  dep('vars', '变量通道');
+
+  // 2) 引擎实例化 + 状态可读
+  let eng = null;
+  try {
+    eng = getEngine();
+    mark('engine', eng && eng.profile ? 'pass' : 'warn', eng ? '引擎已实例化 cid=' + eng.cid : '引擎为空');
+  } catch (e) {
+    mark('engine', 'fail', '实例化失败：' + (e && e.message));
+  }
+
+  // 3) 注入一次（用引擎真实内容，验证注入通道真的能落地）
+  try {
+    doInject('自检');
+    mark('inject-run', lastInjectVia ? 'pass' : 'fail', lastInjectVia ? '注入成功经 ' + lastInjectVia : '两条注入通道都不通');
+  } catch (e) {
+    mark('inject-run', 'fail', '注入抛出异常：' + (e && e.message));
+  }
+
+  // 4) 变量通道：真写一次，验证持久化闭环
+  try {
+    if (globalThis.TavernHelper && typeof globalThis.TavernHelper.insertOrAssignVariables === 'function' && eng) {
+      globalThis.TavernHelper.insertOrAssignVariables({ [eng.key]: { __selfcheck: Date.now() } }, { type: 'script' });
+      mark('vars-run', 'pass', '变量可写（TavernHelper）');
+    } else if (typeof localStorage !== 'undefined') {
+      localStorage.setItem('persona_engine_selfcheck', String(Date.now()));
+      mark('vars-run', 'warn', '退回 localStorage 可写');
+    } else {
+      mark('vars-run', 'fail', '无可持久化通道');
+    }
+  } catch (e) {
+    mark('vars-run', 'fail', '变量写入失败：' + (e && e.message));
+  }
+
+  // 5) 持久化状态回读（能不能把已存的人格读回来）
+  try {
+    if (eng) {
+      const st = eng._storeRead && eng._storeRead();
+      mark('state-read', st ? 'pass' : 'warn', st ? '已存人格可读回' : '无历史状态（首次运行正常）');
+    }
+  } catch (e) {
+    mark('state-read', 'warn', '回读异常：' + (e && e.message));
+  }
+
+  const fails = strip.filter((s) => s.kind === 'fail').length;
+  const warns = strip.filter((s) => s.kind === 'warn').length;
+  lastSelfCheck = {
+    strip,
+    fails,
+    warns,
+    durationMs: ms(),
+    at: Date.now(),
+    via: lastInjectVia || '',
+    summary: fails === 0 && warns === 0 ? '全部通过' : fails ? fails + ' 项异常' : warns + ' 项降级',
+  };
+  if (!silent) log('内部自检', lastSelfCheck.summary, lastSelfCheck.durationMs + 'ms');
+  return lastSelfCheck;
+}
+
+/** 内部自检的一行摘要，用于面板标题：如 "自检✅ 全部通过 · 12ms" */
+function selfCheckLine() {
+  const s = lastSelfCheck || selfCheck(true);
+  const icon = s.fails ? '❌' : s.warns ? '🟡' : '✅';
+  return '自检' + icon + ' ' + s.summary + ' · ' + s.durationMs + 'ms';
+}
+
+/* ---------------- 人格快照（供面板显示「人格变化」） ----------------
+ * 直接读 engine 的实时值：七维 + 情绪词 + 倾向 + 目标。
+ * 与上一次快照对比得出 ↑↓ 变化量，让「人格在怎么变」一眼可见。
+ */
+let prevSnapshot = null;
+
+function personaSnapshot() {
+  let eng = null;
+  try {
+    eng = getEngine();
+  } catch (e) {
+    return null;
+  }
+  if (!eng || !eng.af) return null;
+  const a = eng.af;
+  const dec = eng._dec || {};
+  const snap = {
+    dims: {
+      v: a.v, a: a.a, s: a.s, u: a.u, ct: a.ct, bc: a.bc, c: a.c,
+    },
+    mood: (() => { try { return eng.mood(); } catch (e) { return ''; } })(),
+    intent: dec.intent || 'observe',
+    goal: eng.goals && eng.goals[0] ? eng.goals[0].txt : '',
+    ep: eng.ep || 0,
+    memories: (eng.memories && eng.memories.length) || 0,
+    beliefs: (eng.beliefs && eng.beliefs.length) || 0,
+    at: Date.now(),
+  };
+  // 与上次快照求差
+  const delta = {};
+  if (prevSnapshot) {
+    for (const k in snap.dims) {
+      delta[k] = snap.dims[k] - (prevSnapshot.dims[k] || 0);
+    }
+  }
+  snap.delta = prevSnapshot ? delta : null;
+  snap.prevAt = prevSnapshot ? prevSnapshot.at : null;
+  prevSnapshot = { dims: Object.assign({}, snap.dims), at: snap.at };
+  return snap;
+}
+
 /* ---------------- 注入 ---------------- */
 let injected = false;
 let lastInjectVia = '';
@@ -440,10 +579,22 @@ function exposeApi() {
       healthLine: () => healthLine(),
       probe: () => probeRuntime(),
       injectVia: () => lastInjectVia,
+      // 内部自检：在 Console 里敲 personaEngine.selfCheck() 就能让扩展「自证活着」
+      selfCheck: (silent) => selfCheck(silent),
+      selfCheckLine: () => selfCheckLine(),
+      // 人格快照：直接读实时七维 + 情绪 + 倾向 + 目标，并给出与上一次的差值
+      snapshot: () => personaSnapshot(),
       EXTENSION_ID,
       CARD_OVERRIDE_KEY,
       version: '0.2.0',
-      panel: () => mountPanelWithRetry({ probe: probeRuntime, healthLine, injectVia: () => lastInjectVia }),
+      panel: () => mountPanelWithRetry({
+        probe: probeRuntime,
+        healthLine,
+        injectVia: () => lastInjectVia,
+        selfCheck: (silent) => selfCheck(silent),
+        selfCheckLine: () => selfCheckLine(),
+        snapshot: () => personaSnapshot(),
+      }),
     };
   } catch (e) {
     log('导出 API 失败', e && e.message);
@@ -508,6 +659,9 @@ export function init() {
     probe: probeRuntime,
     healthLine,
     injectVia: () => lastInjectVia,
+    selfCheck: (silent) => selfCheck(silent),
+    selfCheckLine: () => selfCheckLine(),
+    snapshot: () => personaSnapshot(),
     refresh: () => {
       getEngine(true);
       doInject('面板重载');
