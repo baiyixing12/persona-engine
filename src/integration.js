@@ -15,7 +15,9 @@
 import { createEngine } from './engine.js';
 import { ENGINE_VERSION } from './defaults.js';
 import { resolveProfile, EXTENSION_ID, CARD_OVERRIDE_KEY } from './config.js';
+import { getExtensionState, updateExtensionState } from './config.js';
 import { mountPanelWithRetry } from './ui.js';
+import { generateGuard, listApiOptions, canGenerate } from './guardgen.js';
 
 const LOGTAG = '[人格引擎]';
 const PROMPT_ID = 'persona_engine_inject';
@@ -614,6 +616,27 @@ function exposeApi() {
       selfCheckLine: (force) => selfCheckLine(force),
       // 人格快照：直接读实时七维 + 情绪 + 倾向 + 目标，并给出与上一次的差值
       snapshot: () => personaSnapshot(),
+      // 人设护栏生成器：Console 里 personaEngine.guardGen.list()/can()/save(obj)/on(true|false)/raw()
+      guardGen: {
+        can: () => {
+          try {
+            return canGenerate ? canGenerate() : false;
+          } catch (e) {
+            return false;
+          }
+        },
+        list: () => {
+          try {
+            return (listApiOptions && listApiOptions()) || [];
+          } catch (e) {
+            return [];
+          }
+        },
+        gen: (text, opts) => generateGuard(text, opts),
+        save: (obj, meta) => saveGuard(obj, meta),
+        on: (v) => setGuardOn(v),
+        raw: () => guardRaw(),
+      },
       EXTENSION_ID,
       CARD_OVERRIDE_KEY,
       version: ENGINE_VERSION,
@@ -632,11 +655,109 @@ function exposeApi() {
           const g = getEngine().profile.persona_guard;
           return !!(g && g.enabled === true);
         },
+        ...guardGenDeps(),
       }),
     };
   } catch (e) {
     log('导出 API 失败', e && e.message);
   }
+}
+
+/* ---------------- 人设护栏生成器 · 依赖实现 ---------------- */
+/**
+ * 读取当前生效的 persona_guard 原始对象（扩展变量层优先，回退到引擎实时档案）。
+ */
+function guardRaw() {
+  try {
+    const st = getExtensionState ? getExtensionState() : null;
+    if (st && st.persona_guard && typeof st.persona_guard === 'object') {
+      return JSON.parse(JSON.stringify(st.persona_guard));
+    }
+  } catch (e) {}
+  try {
+    const g = getEngine().profile && getEngine().profile.persona_guard;
+    if (g) return JSON.parse(JSON.stringify(g));
+  } catch (e) {}
+  return null;
+}
+/**
+ * 把生成/编辑后的护栏内容写回扩展变量层（全局生效，不动角色卡）。
+ * @returns {boolean} 是否写入成功
+ */
+function saveGuard(obj, meta) {
+  try {
+    if (!obj || typeof obj !== 'object') return false;
+    const cur = guardRaw() || {};
+    const next = Object.assign({}, cur, {
+      identity: Array.isArray(obj.identity) ? obj.identity : [],
+      voice: Array.isArray(obj.voice) ? obj.voice : [],
+      forbidden: Array.isArray(obj.forbidden) ? obj.forbidden : [],
+      drift_rules: Array.isArray(obj.drift_rules) ? obj.drift_rules : [],
+      gen: {
+        source: (meta && meta.source) || '',
+        api: (meta && meta.api) || '',
+        model: '',
+        at: Date.now(),
+      },
+    });
+    if (typeof next.enabled !== 'boolean') next.enabled = true;
+    const ok = updateExtensionState
+      ? updateExtensionState((prev) => Object.assign({}, prev, { persona_guard: next }))
+      : false;
+    // 立刻按新配置重载引擎并重新注入，做到「保存即生效」
+    try {
+      getEngine(true);
+      doInject('护栏已更新');
+    } catch (e) {}
+    return ok !== false;
+  } catch (e) {
+    log('保存护栏失败', e && e.message);
+    return false;
+  }
+}
+/**
+ * 开关人设护栏：写扩展变量的 persona_guard.enabled，并即时重载生效。
+ */
+function setGuardOn(on) {
+  try {
+    const next = Object.assign({}, guardRaw() || {}, { enabled: on === true });
+    const ok = updateExtensionState
+      ? updateExtensionState((prev) => Object.assign({}, prev, { persona_guard: next }))
+      : false;
+    try {
+      getEngine(true);
+      doInject(on ? '护栏开启' : '护栏关闭');
+    } catch (e) {}
+    return ok !== false;
+  } catch (e) {
+    log('切换护栏开关失败', e && e.message);
+    return false;
+  }
+}
+/**
+ * 组装生成器所需的一整套依赖，供两处 mountPanelWithRetry 复用。
+ */
+function guardGenDeps() {
+  return {
+    canGenerate: () => {
+      try {
+        return canGenerate ? canGenerate() : false;
+      } catch (e) {
+        return false;
+      }
+    },
+    listApiOptions: () => {
+      try {
+        return (listApiOptions && listApiOptions()) || [];
+      } catch (e) {
+        return [];
+      }
+    },
+    generateGuard: (text, opts) => generateGuard(text, opts),
+    saveGuard,
+    setGuardOn,
+    guardRaw,
+  };
 }
 
 /* ---------------- 启动 ---------------- */
@@ -708,6 +829,7 @@ export function init() {
       const g = getEngine().profile.persona_guard;
       return !!(g && g.enabled === true);
     },
+    ...guardGenDeps(),
     refresh: () => {
       getEngine(true);
       doInject('面板重载');

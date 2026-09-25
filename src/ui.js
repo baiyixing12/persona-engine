@@ -14,6 +14,11 @@
 
 const LOGTAG = '[人格引擎]';
 const PANEL_ID = 'persona_engine_panel';
+/**
+ * 生成器的跨重绘缓存：面板每次刷新都会清空重建 DOM，用户粘贴进去的
+ * 人设原文与已生成的 JSON 若不留住就会被擦掉。这里做一层内存缓存。
+ */
+const GEN_CACHE = { src: '', out: '', api: '' };
 
 function log(...a) {
   try {
@@ -185,7 +190,7 @@ function injectStyles() {
     '#' + PANEL_ID + ' .pe-head{font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;letter-spacing:.06em;}',
     '#' + PANEL_ID + ' .pe-name{font-weight:700;font-size:0.86em;opacity:.92;}',
     '#' + PANEL_ID + ' .pe-ver{font-size:0.78em;opacity:.6;font-variant-numeric:tabular-nums;}',
-    '#' + PANEL_ID + ' .pe-led{width:8px;height:8px;border-radius:50%%;flex:0 0 auto;background:#8a8a8a;}',
+    '#' + PANEL_ID + ' .pe-led{width:8px;height:8px;border-radius:50%;flex:0 0 auto;background:#8a8a8a;}',
     '#' + PANEL_ID + ' .pe-led.pe-on{background:#4ec46f;box-shadow:0 0 6px #4ec46f;}',
     '#' + PANEL_ID + ' .pe-led.pe-off{background:#6d6d6d;}',
     '#' + PANEL_ID + ' .pe-led.pe-warn{background:#e0b24a;box-shadow:0 0 6px #e0b24a;animation:pe-blink 1.1s ease-in-out infinite;}',
@@ -196,7 +201,18 @@ function injectStyles() {
     '#' + PANEL_ID + ' .pe-guardtext{font-size:0.8em;opacity:.85;line-height:1.5;white-space:pre-wrap;}',
     '#' + PANEL_ID + ' .pe-guardraw{margin:2px 0 4px;}',
     '#' + PANEL_ID + ' .pe-guardraw>summary{cursor:pointer;font-size:0.8em;opacity:.8;}',
-    '@keyframes pe-blink{0%%,100%%{opacity:1;}50%%{opacity:.35;}}',
+    // 人设护栏生成器
+    '#' + PANEL_ID + ' .pe-gen{margin:6px 0 2px;border-top:1px dashed rgba(128,128,128,.3);padding-top:6px;}',
+    '#' + PANEL_ID + ' .pe-gentitle{font-size:0.86em;font-weight:700;opacity:.92;margin-bottom:4px;}',
+    '#' + PANEL_ID + ' .pe-genrow{display:flex;align-items:center;gap:6px;margin:4px 0;font-size:0.82em;flex-wrap:wrap;}',
+    '#' + PANEL_ID + ' .pe-genrow label{opacity:.85;}',
+    '#' + PANEL_ID + ' .pe-gen textarea{width:100%;min-height:72px;box-sizing:border-box;font-size:0.84em;line-height:1.45;resize:vertical;font-family:inherit;}',
+    '#' + PANEL_ID + ' .pe-gen select{font-size:0.84em;max-width:100%;}',
+    '#' + PANEL_ID + ' .pe-gen .pe-out{width:100%;min-height:90px;box-sizing:border-box;font-size:0.8em;line-height:1.45;resize:vertical;font-family:ui-monospace,Menlo,Consolas,monospace;}',
+    '#' + PANEL_ID + ' .pe-note.pe-warn{color:#e0b24a;opacity:.95;}',
+    '#' + PANEL_ID + ' .pe-note.pe-ok{color:#4ec46f;opacity:.95;}',
+    '#' + PANEL_ID + ' .pe-note.pe-bad{color:#e0534a;opacity:.95;}',
+    '@keyframes pe-blink{0%,100%{opacity:1;}50%{opacity:.35;}}',
   ].join('');
   document.head.appendChild(style);
 }
@@ -245,7 +261,8 @@ function renderGuard(root, deps) {
     if (!on) {
       const hint = document.createElement('div');
       hint.className = 'pe-hint';
-      hint.textContent = '人设护栏未启用 · 可在角色卡 persona_engine_profile.persona_guard.enabled=true 开启';
+      // enabled 默认 true：走到这里说明被显式关掉了（面板开关 / 变量 / 角色卡）。
+      hint.textContent = '人设护栏已关闭 · 可用下方「生成器」旁的开关键重新打开';
       box.appendChild(hint);
       root.appendChild(box);
       return;
@@ -272,6 +289,248 @@ function renderGuard(root, deps) {
     root.appendChild(box);
   } catch (e) {}
 }
+/**
+ * 人设护栏生成器（UI 层）。
+ *
+ * 用户操作流：粘贴角色人设原文 → 选一个 API（主 API 或某个副 API 预设）→ 生成
+ * → 审校/微调 JSON → 保存（写入扩展变量 persona_guard，对所有卡生效）。
+ *
+ * deps 需要：canGenerate()/listApiOptions()/generateGuard(text,{api})/
+ *            saveGuard(guardObj,{source,api})/guardOn()/setGuardOn(bool)/guardRaw()
+ * 任一缺失都只降级显示，不抛错（整个函数包在 try 里）。
+ */
+function renderGuardGen(root, deps) {
+  try {
+    const can = !!(deps && deps.canGenerate && deps.canGenerate());
+    const box = document.createElement('div');
+    box.className = 'pe-gen pe-sec';
+
+    const title = document.createElement('div');
+    title.className = 'pe-gentitle';
+    title.textContent = '人设护栏生成器';
+    box.appendChild(title);
+
+    // —— 开关行：ON/OFF（唯一的一个开关，用户要求「最多一个」）
+    const on = !!(deps && deps.guardOn && deps.guardOn());
+    const swRow = document.createElement('div');
+    swRow.className = 'pe-genrow';
+    const swLabel = document.createElement('label');
+    swLabel.textContent = '护栏开关：';
+    const swBtn = document.createElement('button');
+    swBtn.type = 'button';
+    swBtn.className = 'menu_button';
+    swBtn.textContent = on ? '已开启（点击关闭）' : '已关闭（点击开启）';
+    swBtn.addEventListener('click', () => {
+      try {
+        if (deps && deps.setGuardOn) deps.setGuardOn(!on);
+      } catch (e) {
+        log('切换护栏开关失败', e && e.message);
+      }
+      // 面板内容每次刷新都会被清空重建，这里用 deps.rerender（renderPanel 注入，指向面板 body）
+      if (deps && deps.rerender) deps.rerender();
+    });
+    swRow.appendChild(swLabel);
+    swRow.appendChild(swBtn);
+    box.appendChild(swRow);
+
+    if (!can) {
+      const note = document.createElement('div');
+      note.className = 'pe-note pe-warn';
+      note.textContent = '生成器不可用：未探测到 TavernHelper.generateRaw / generate（需要酒馆助手 JS-Slash-Runner）。可手动在变量里写 persona_guard。';
+      box.appendChild(note);
+      root.appendChild(box);
+      return;
+    }
+
+    // —— 原文粘贴框
+    const srcRow = document.createElement('div');
+    srcRow.className = 'pe-genrow';
+    const srcLabel = document.createElement('label');
+    srcLabel.textContent = '粘贴角色人设原文：';
+    srcRow.appendChild(srcLabel);
+    box.appendChild(srcRow);
+
+    const src = document.createElement('textarea');
+    src.placeholder = '把角色的设定/描述原文整段粘贴到这里。生成器会把它转成结构化护栏（身份/语气/禁止/漂移规则），用于生成前约束模型不写崩人设。';
+    src.value = GEN_CACHE.src || '';
+    src.addEventListener('input', () => { GEN_CACHE.src = src.value; });
+    box.appendChild(src);
+
+    // —— API 选择行
+    let options = [];
+    try {
+      options = (deps && deps.listApiOptions && deps.listApiOptions()) || [];
+    } catch (e) {
+      options = [];
+    }
+    if (!options.length) options = ['默认（主 API）'];
+    const apiRow = document.createElement('div');
+    apiRow.className = 'pe-genrow';
+    const apiLabel = document.createElement('label');
+    apiLabel.textContent = '使用 API：';
+    const sel = document.createElement('select');
+    for (const name of options) {
+      const opt = document.createElement('option');
+      opt.value = name;
+      opt.textContent = name;
+      sel.appendChild(opt);
+    }
+    apiRow.appendChild(apiLabel);
+    apiRow.appendChild(sel);
+    // 还原上次选中的 API（若仍存在）
+    if (GEN_CACHE.api && options.indexOf(GEN_CACHE.api) >= 0) sel.value = GEN_CACHE.api;
+    sel.addEventListener('change', () => { GEN_CACHE.api = sel.value; });
+    // 有副 API 选项时给一句指引；只有主 API 时提示怎么加副 API
+    const apiNote = document.createElement('span');
+    apiNote.className = 'pe-note';
+    apiNote.textContent = options.length > 1
+      ? '（副 API = 酒馆「API连接 → 代理预设」里的预设名）'
+      : '（只有主 API；想要副 API 请先在酒馆「API连接 → 代理预设」新增一条预设）';
+    apiRow.appendChild(apiNote);
+    box.appendChild(apiRow);
+
+    // —— 生成按钮 + 状态提示
+    const actRow = document.createElement('div');
+    actRow.className = 'pe-genrow';
+    const genBtn = document.createElement('button');
+    genBtn.type = 'button';
+    genBtn.className = 'menu_button';
+    genBtn.textContent = '生成护栏';
+    const status = document.createElement('span');
+    status.className = 'pe-note';
+    status.textContent = '';
+    actRow.appendChild(genBtn);
+    actRow.appendChild(status);
+    box.appendChild(actRow);
+
+    // —— 预览/审校区
+    const outRow = document.createElement('div');
+    outRow.className = 'pe-genrow';
+    const outLabel = document.createElement('label');
+    outLabel.textContent = '生成结果（可直接编辑后再保存）：';
+    outRow.appendChild(outLabel);
+    box.appendChild(outRow);
+
+    const out = document.createElement('textarea');
+    out.className = 'pe-out';
+    out.placeholder = '生成后这里会出现 JSON，可自行删改。点「保存护栏」写入扩展变量。';
+    out.value = GEN_CACHE.out || '';
+    out.addEventListener('input', () => { GEN_CACHE.out = out.value; });
+    box.appendChild(out);
+
+    // —— 保存行
+    const saveRow = document.createElement('div');
+    saveRow.className = 'pe-genrow';
+    const saveBtn = document.createElement('button');
+    saveBtn.type = 'button';
+    saveBtn.className = 'menu_button';
+    saveBtn.textContent = '保存护栏';
+    const clearBtn = document.createElement('button');
+    clearBtn.type = 'button';
+    clearBtn.className = 'menu_button';
+    clearBtn.textContent = '清空护栏';
+    saveRow.appendChild(saveBtn);
+    saveRow.appendChild(clearBtn);
+    box.appendChild(saveRow);
+
+    // 若已有护栏且缓存为空，把当前内容预填到预览框，方便查看/微调
+    try {
+      const cur = deps && deps.guardRaw ? deps.guardRaw() : null;
+      if (cur && !GEN_CACHE.out) {
+        GEN_CACHE.out = JSON.stringify(cur, null, 2);
+        out.value = GEN_CACHE.out;
+        status.textContent = '当前已保存护栏：身份' + (cur.identity || []).length +
+          ' / 语气' + (cur.voice || []).length +
+          ' / 禁止' + (cur.forbidden || []).length +
+          ' / 漂移' + (cur.drift_rules || []).length;
+        status.className = 'pe-note pe-ok';
+      }
+    } catch (e) {}
+
+    genBtn.addEventListener('click', () => {
+      const text = (src.value || '').trim();
+      if (!text) {
+        status.className = 'pe-note pe-warn';
+        status.textContent = '请先粘贴角色人设原文。';
+        return;
+      }
+      genBtn.disabled = true;
+      const prev = genBtn.textContent;
+      genBtn.textContent = '生成中…';
+      status.className = 'pe-note';
+      status.textContent = '正在调用 ' + (sel.value || '主 API') + ' 转换…';
+      Promise.resolve()
+        .then(() => deps.generateGuard(text, { api: sel.value }))
+        .then((res) => {
+          if (res && res.ok) {
+            GEN_CACHE.out = JSON.stringify(res.guard, null, 2);
+            out.value = GEN_CACHE.out;
+            status.className = 'pe-note pe-ok';
+            status.textContent = '生成成功（' + (res.api || sel.value) + '）。请审校后点保存。';
+          } else {
+            status.className = 'pe-note pe-bad';
+            status.textContent = '生成失败：' + ((res && res.error) || '未知错误');
+          }
+        })
+        .catch((e) => {
+          status.className = 'pe-note pe-bad';
+          status.textContent = '生成异常：' + (e && e.message);
+        })
+        .then(() => {
+          genBtn.disabled = false;
+          genBtn.textContent = prev;
+        });
+    });
+
+    saveBtn.addEventListener('click', () => {
+      const raw = (out.value || '').trim();
+      if (!raw) {
+        status.className = 'pe-note pe-warn';
+        status.textContent = '预览为空，先「生成护栏」或手动填入 JSON。';
+        return;
+      }
+      let obj = null;
+      try {
+        obj = JSON.parse(raw);
+      } catch (e) {
+        status.className = 'pe-note pe-bad';
+        status.textContent = 'JSON 解析失败：' + (e && e.message);
+        return;
+      }
+      try {
+        const ok = deps.saveGuard ? deps.saveGuard(obj, { source: src.value, api: sel.value }) : false;
+        if (ok) {
+          status.className = 'pe-note pe-ok';
+          status.textContent = '已保存（' + (sel.value || '主 API') + ' 生成）。护栏已即时生效。';
+        } else {
+          status.className = 'pe-note pe-bad';
+          status.textContent = '保存失败：写入扩展变量返回 false。';
+        }
+      } catch (e) {
+        status.className = 'pe-note pe-bad';
+        status.textContent = '保存异常：' + (e && e.message);
+      }
+    });
+
+    clearBtn.addEventListener('click', () => {
+      try {
+        if (deps.saveGuard) deps.saveGuard({ identity: [], voice: [], forbidden: [], drift_rules: [] }, { source: '', api: '' });
+        GEN_CACHE.out = '';
+        out.value = '';
+        status.className = 'pe-note pe-ok';
+        status.textContent = '护栏内容已清空（开关仍保持原状态）。';
+      } catch (e) {
+        status.className = 'pe-note pe-bad';
+        status.textContent = '清空失败：' + (e && e.message);
+      }
+    });
+
+    root.appendChild(box);
+  } catch (e) {
+    log('渲染护栏生成器失败（不影响引擎）', e && e.message);
+  }
+}
+
 /**
  * 渲染/刷新面板内容。
  * @param {HTMLElement} root 面板根节点
@@ -344,6 +603,9 @@ function renderPanel(root, deps) {
   renderPersona(root, deps);
   // 人设护栏状态区
   renderGuard(root, deps);
+  // 人设护栏生成器（粘贴原文 → 调 API → 审校 → 保存）
+  // 给生成器一个「重绘我自己」的回调，避免开关切换后面板状态不刷新
+  renderGuardGen(root, Object.assign({}, deps, { rerender: () => renderPanel(root, deps) }));
 
   // 操作按钮
   const btns = document.createElement('div');

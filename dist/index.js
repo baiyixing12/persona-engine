@@ -1,5 +1,5 @@
 // src/defaults.js
-var ENGINE_VERSION = "0.4.0";
+var ENGINE_VERSION = "0.5.0";
 var DEFAULT_EVENTS = [
   // 注意：`抱` 必须排除「抱歉」，否则任何道歉都会被误判成亲密（中文子串陷阱）。
   { id: "intimate", pattern: "\u62E5\u62B1|(?:\u62B1)(?!\u6B49)|\u7275\u624B|\u9760\u7740|\u8D34\u8FD1|\u4F9D\u504E", z: 0.75, effect: { valence: 0.35, arousal: 0.15 } },
@@ -249,15 +249,28 @@ var DEFAULT_PROFILE = {
    *   always       -- 是否总是输出 identity/voice/forbidden（drift 命中项另行追加）
    */
   persona_guard: {
-    enabled: false,
-    // 默认关：空护栏对任何卡都是噪音，由角色卡自己打开
+    // 默认开：配合 guard() 的「空内容短路」，没内容时不会产生任何注入噪音，
+    // 因此可以安全地对所有卡默认打开；用户粘一次人设就立刻生效。
+    enabled: true,
     always: true,
     header: "\u3010\u4EBA\u8BBE\u62A4\u680F\u3011\u4EE5\u4E0B\u662F{{char}}\u5728\u4EFB\u4F55\u60C5\u51B5\u4E0B\u90FD\u4E0D\u80FD\u8FDD\u80CC\u7684\u8BBE\u5B9A\uFF0C\u4F18\u5148\u7EA7\u9AD8\u4E8E\u5267\u60C5\u63A8\u8FDB\u7684\u4FBF\u5229\u3002\n",
     footer: "\n\uFF08\u82E5\u4E0A\u6587\u4E0E\u6B64\u5904\u51B2\u7A81\uFF0C\u4EE5\u6B64\u5904\u4E3A\u51C6\u3002\uFF09",
     identity: [],
     voice: [],
     forbidden: [],
-    drift_rules: []
+    drift_rules: [],
+    /* ---------- 护栏生成器（把自然语言人设转成上面的结构化护栏） ----------
+     * source    -- 用户粘贴的人设原文（仅作留档，方便二次生成/对照）
+     * api       -- 用哪个 API 生成：'' = ST 主 API；其它 = ST「代理预设」名（副 API）
+     * model     -- 可选，覆盖模型名（留空则用所选 API 默认模型）
+     * at        -- 上次生成时间戳（0 表示从未生成过）
+     */
+    gen: {
+      source: "",
+      api: "",
+      model: "",
+      at: 0
+    }
   },
   bounds: { low: 0, high: 10, initial: 5 },
   /* ---------- MVU 桥（默认关） ---------- */
@@ -285,9 +298,16 @@ function deepMerge(base, patch) {
 }
 function readVars(option) {
   try {
-    const TH = globalThis.TavernHelper;
-    if (!TH || typeof TH.getVariables !== "function") return void 0;
-    return TH.getVariables(option);
+    const TH2 = globalThis.TavernHelper;
+    if (!TH2 || typeof TH2.getVariables !== "function") return void 0;
+    return TH2.getVariables(option);
+  } catch (e) {
+    return void 0;
+  }
+}
+function readWriteSafe(fn) {
+  try {
+    return fn();
   } catch (e) {
     return void 0;
   }
@@ -304,6 +324,17 @@ function resolveProfile(opts = {}) {
   let merged = deepMerge(DEFAULT_PROFILE, extProfile);
   merged = deepMerge(merged, cardProfile);
   return merged;
+}
+function getExtensionState() {
+  return readVars({ type: "extension", extension_id: EXTENSION_ID }) || {};
+}
+function updateExtensionState(updater) {
+  return readWriteSafe(() => {
+    const TH2 = globalThis.TavernHelper;
+    if (!TH2 || typeof TH2.updateVariablesWith !== "function") return false;
+    TH2.updateVariablesWith(updater, { type: "extension", extension_id: EXTENSION_ID });
+    return true;
+  });
 }
 
 // src/engine.js
@@ -455,9 +486,9 @@ var PersonaEngine = class {
   /* ---- 持久化：优先走酒馆助手脚本变量，退化到 localStorage ---- */
   _storeRead() {
     try {
-      const TH = globalThis.TavernHelper;
-      if (TH && typeof TH.getVariables === "function") {
-        const v = TH.getVariables({ type: "script" });
+      const TH2 = globalThis.TavernHelper;
+      if (TH2 && typeof TH2.getVariables === "function") {
+        const v = TH2.getVariables({ type: "script" });
         if (v && v[this.key]) return v[this.key];
       }
     } catch (e) {
@@ -473,9 +504,9 @@ var PersonaEngine = class {
   }
   _storeWrite(obj) {
     try {
-      const TH = globalThis.TavernHelper;
-      if (TH && typeof TH.insertOrAssignVariables === "function") {
-        TH.insertOrAssignVariables({ [this.key]: obj }, { type: "script" });
+      const TH2 = globalThis.TavernHelper;
+      if (TH2 && typeof TH2.insertOrAssignVariables === "function") {
+        TH2.insertOrAssignVariables({ [this.key]: obj }, { type: "script" });
         return;
       }
     } catch (e) {
@@ -849,7 +880,7 @@ var PersonaEngine = class {
    */
   guard() {
     const G = this.profile.persona_guard;
-    if (!G || G.enabled !== true) return "";
+    if (!G || G.enabled === false) return "";
     const L = [];
     const tctx = this.tctx;
     const list = (arr, bullet, inline) => (Array.isArray(arr) ? arr : []).map((x) => typeof x === "string" ? x.trim() : "").filter(Boolean).map((x) => tpl(x, tctx)).map((x) => bullet == null ? x : bullet + x);
@@ -931,6 +962,7 @@ function createEngine(cid, opts = {}) {
 // src/ui.js
 var LOGTAG = "[\u4EBA\u683C\u5F15\u64CE]";
 var PANEL_ID = "persona_engine_panel";
+var GEN_CACHE = { src: "", out: "", api: "" };
 function log(...a) {
   try {
     console.log.apply(console, [LOGTAG].concat([].slice.call(a)));
@@ -1076,7 +1108,7 @@ function injectStyles() {
     "#" + PANEL_ID + " .pe-head{font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;letter-spacing:.06em;}",
     "#" + PANEL_ID + " .pe-name{font-weight:700;font-size:0.86em;opacity:.92;}",
     "#" + PANEL_ID + " .pe-ver{font-size:0.78em;opacity:.6;font-variant-numeric:tabular-nums;}",
-    "#" + PANEL_ID + " .pe-led{width:8px;height:8px;border-radius:50%%;flex:0 0 auto;background:#8a8a8a;}",
+    "#" + PANEL_ID + " .pe-led{width:8px;height:8px;border-radius:50%;flex:0 0 auto;background:#8a8a8a;}",
     "#" + PANEL_ID + " .pe-led.pe-on{background:#4ec46f;box-shadow:0 0 6px #4ec46f;}",
     "#" + PANEL_ID + " .pe-led.pe-off{background:#6d6d6d;}",
     "#" + PANEL_ID + " .pe-led.pe-warn{background:#e0b24a;box-shadow:0 0 6px #e0b24a;animation:pe-blink 1.1s ease-in-out infinite;}",
@@ -1087,7 +1119,18 @@ function injectStyles() {
     "#" + PANEL_ID + " .pe-guardtext{font-size:0.8em;opacity:.85;line-height:1.5;white-space:pre-wrap;}",
     "#" + PANEL_ID + " .pe-guardraw{margin:2px 0 4px;}",
     "#" + PANEL_ID + " .pe-guardraw>summary{cursor:pointer;font-size:0.8em;opacity:.8;}",
-    "@keyframes pe-blink{0%%,100%%{opacity:1;}50%%{opacity:.35;}}"
+    // 人设护栏生成器
+    "#" + PANEL_ID + " .pe-gen{margin:6px 0 2px;border-top:1px dashed rgba(128,128,128,.3);padding-top:6px;}",
+    "#" + PANEL_ID + " .pe-gentitle{font-size:0.86em;font-weight:700;opacity:.92;margin-bottom:4px;}",
+    "#" + PANEL_ID + " .pe-genrow{display:flex;align-items:center;gap:6px;margin:4px 0;font-size:0.82em;flex-wrap:wrap;}",
+    "#" + PANEL_ID + " .pe-genrow label{opacity:.85;}",
+    "#" + PANEL_ID + " .pe-gen textarea{width:100%;min-height:72px;box-sizing:border-box;font-size:0.84em;line-height:1.45;resize:vertical;font-family:inherit;}",
+    "#" + PANEL_ID + " .pe-gen select{font-size:0.84em;max-width:100%;}",
+    "#" + PANEL_ID + " .pe-gen .pe-out{width:100%;min-height:90px;box-sizing:border-box;font-size:0.8em;line-height:1.45;resize:vertical;font-family:ui-monospace,Menlo,Consolas,monospace;}",
+    "#" + PANEL_ID + " .pe-note.pe-warn{color:#e0b24a;opacity:.95;}",
+    "#" + PANEL_ID + " .pe-note.pe-ok{color:#4ec46f;opacity:.95;}",
+    "#" + PANEL_ID + " .pe-note.pe-bad{color:#e0534a;opacity:.95;}",
+    "@keyframes pe-blink{0%,100%{opacity:1;}50%{opacity:.35;}}"
   ].join("");
   document.head.appendChild(style);
 }
@@ -1133,7 +1176,7 @@ function renderGuard(root, deps) {
     if (!on) {
       const hint = document.createElement("div");
       hint.className = "pe-hint";
-      hint.textContent = "\u4EBA\u8BBE\u62A4\u680F\u672A\u542F\u7528 \xB7 \u53EF\u5728\u89D2\u8272\u5361 persona_engine_profile.persona_guard.enabled=true \u5F00\u542F";
+      hint.textContent = "\u4EBA\u8BBE\u62A4\u680F\u5DF2\u5173\u95ED \xB7 \u53EF\u7528\u4E0B\u65B9\u300C\u751F\u6210\u5668\u300D\u65C1\u7684\u5F00\u5173\u952E\u91CD\u65B0\u6253\u5F00";
       box.appendChild(hint);
       root.appendChild(box);
       return;
@@ -1159,6 +1202,210 @@ function renderGuard(root, deps) {
     box.appendChild(det);
     root.appendChild(box);
   } catch (e) {
+  }
+}
+function renderGuardGen(root, deps) {
+  try {
+    const can = !!(deps && deps.canGenerate && deps.canGenerate());
+    const box = document.createElement("div");
+    box.className = "pe-gen pe-sec";
+    const title = document.createElement("div");
+    title.className = "pe-gentitle";
+    title.textContent = "\u4EBA\u8BBE\u62A4\u680F\u751F\u6210\u5668";
+    box.appendChild(title);
+    const on = !!(deps && deps.guardOn && deps.guardOn());
+    const swRow = document.createElement("div");
+    swRow.className = "pe-genrow";
+    const swLabel = document.createElement("label");
+    swLabel.textContent = "\u62A4\u680F\u5F00\u5173\uFF1A";
+    const swBtn = document.createElement("button");
+    swBtn.type = "button";
+    swBtn.className = "menu_button";
+    swBtn.textContent = on ? "\u5DF2\u5F00\u542F\uFF08\u70B9\u51FB\u5173\u95ED\uFF09" : "\u5DF2\u5173\u95ED\uFF08\u70B9\u51FB\u5F00\u542F\uFF09";
+    swBtn.addEventListener("click", () => {
+      try {
+        if (deps && deps.setGuardOn) deps.setGuardOn(!on);
+      } catch (e) {
+        log("\u5207\u6362\u62A4\u680F\u5F00\u5173\u5931\u8D25", e && e.message);
+      }
+      if (deps && deps.rerender) deps.rerender();
+    });
+    swRow.appendChild(swLabel);
+    swRow.appendChild(swBtn);
+    box.appendChild(swRow);
+    if (!can) {
+      const note = document.createElement("div");
+      note.className = "pe-note pe-warn";
+      note.textContent = "\u751F\u6210\u5668\u4E0D\u53EF\u7528\uFF1A\u672A\u63A2\u6D4B\u5230 TavernHelper.generateRaw / generate\uFF08\u9700\u8981\u9152\u9986\u52A9\u624B JS-Slash-Runner\uFF09\u3002\u53EF\u624B\u52A8\u5728\u53D8\u91CF\u91CC\u5199 persona_guard\u3002";
+      box.appendChild(note);
+      root.appendChild(box);
+      return;
+    }
+    const srcRow = document.createElement("div");
+    srcRow.className = "pe-genrow";
+    const srcLabel = document.createElement("label");
+    srcLabel.textContent = "\u7C98\u8D34\u89D2\u8272\u4EBA\u8BBE\u539F\u6587\uFF1A";
+    srcRow.appendChild(srcLabel);
+    box.appendChild(srcRow);
+    const src = document.createElement("textarea");
+    src.placeholder = "\u628A\u89D2\u8272\u7684\u8BBE\u5B9A/\u63CF\u8FF0\u539F\u6587\u6574\u6BB5\u7C98\u8D34\u5230\u8FD9\u91CC\u3002\u751F\u6210\u5668\u4F1A\u628A\u5B83\u8F6C\u6210\u7ED3\u6784\u5316\u62A4\u680F\uFF08\u8EAB\u4EFD/\u8BED\u6C14/\u7981\u6B62/\u6F02\u79FB\u89C4\u5219\uFF09\uFF0C\u7528\u4E8E\u751F\u6210\u524D\u7EA6\u675F\u6A21\u578B\u4E0D\u5199\u5D29\u4EBA\u8BBE\u3002";
+    src.value = GEN_CACHE.src || "";
+    src.addEventListener("input", () => {
+      GEN_CACHE.src = src.value;
+    });
+    box.appendChild(src);
+    let options = [];
+    try {
+      options = deps && deps.listApiOptions && deps.listApiOptions() || [];
+    } catch (e) {
+      options = [];
+    }
+    if (!options.length) options = ["\u9ED8\u8BA4\uFF08\u4E3B API\uFF09"];
+    const apiRow = document.createElement("div");
+    apiRow.className = "pe-genrow";
+    const apiLabel = document.createElement("label");
+    apiLabel.textContent = "\u4F7F\u7528 API\uFF1A";
+    const sel = document.createElement("select");
+    for (const name of options) {
+      const opt = document.createElement("option");
+      opt.value = name;
+      opt.textContent = name;
+      sel.appendChild(opt);
+    }
+    apiRow.appendChild(apiLabel);
+    apiRow.appendChild(sel);
+    if (GEN_CACHE.api && options.indexOf(GEN_CACHE.api) >= 0) sel.value = GEN_CACHE.api;
+    sel.addEventListener("change", () => {
+      GEN_CACHE.api = sel.value;
+    });
+    const apiNote = document.createElement("span");
+    apiNote.className = "pe-note";
+    apiNote.textContent = options.length > 1 ? "\uFF08\u526F API = \u9152\u9986\u300CAPI\u8FDE\u63A5 \u2192 \u4EE3\u7406\u9884\u8BBE\u300D\u91CC\u7684\u9884\u8BBE\u540D\uFF09" : "\uFF08\u53EA\u6709\u4E3B API\uFF1B\u60F3\u8981\u526F API \u8BF7\u5148\u5728\u9152\u9986\u300CAPI\u8FDE\u63A5 \u2192 \u4EE3\u7406\u9884\u8BBE\u300D\u65B0\u589E\u4E00\u6761\u9884\u8BBE\uFF09";
+    apiRow.appendChild(apiNote);
+    box.appendChild(apiRow);
+    const actRow = document.createElement("div");
+    actRow.className = "pe-genrow";
+    const genBtn = document.createElement("button");
+    genBtn.type = "button";
+    genBtn.className = "menu_button";
+    genBtn.textContent = "\u751F\u6210\u62A4\u680F";
+    const status = document.createElement("span");
+    status.className = "pe-note";
+    status.textContent = "";
+    actRow.appendChild(genBtn);
+    actRow.appendChild(status);
+    box.appendChild(actRow);
+    const outRow = document.createElement("div");
+    outRow.className = "pe-genrow";
+    const outLabel = document.createElement("label");
+    outLabel.textContent = "\u751F\u6210\u7ED3\u679C\uFF08\u53EF\u76F4\u63A5\u7F16\u8F91\u540E\u518D\u4FDD\u5B58\uFF09\uFF1A";
+    outRow.appendChild(outLabel);
+    box.appendChild(outRow);
+    const out = document.createElement("textarea");
+    out.className = "pe-out";
+    out.placeholder = "\u751F\u6210\u540E\u8FD9\u91CC\u4F1A\u51FA\u73B0 JSON\uFF0C\u53EF\u81EA\u884C\u5220\u6539\u3002\u70B9\u300C\u4FDD\u5B58\u62A4\u680F\u300D\u5199\u5165\u6269\u5C55\u53D8\u91CF\u3002";
+    out.value = GEN_CACHE.out || "";
+    out.addEventListener("input", () => {
+      GEN_CACHE.out = out.value;
+    });
+    box.appendChild(out);
+    const saveRow = document.createElement("div");
+    saveRow.className = "pe-genrow";
+    const saveBtn = document.createElement("button");
+    saveBtn.type = "button";
+    saveBtn.className = "menu_button";
+    saveBtn.textContent = "\u4FDD\u5B58\u62A4\u680F";
+    const clearBtn = document.createElement("button");
+    clearBtn.type = "button";
+    clearBtn.className = "menu_button";
+    clearBtn.textContent = "\u6E05\u7A7A\u62A4\u680F";
+    saveRow.appendChild(saveBtn);
+    saveRow.appendChild(clearBtn);
+    box.appendChild(saveRow);
+    try {
+      const cur = deps && deps.guardRaw ? deps.guardRaw() : null;
+      if (cur && !GEN_CACHE.out) {
+        GEN_CACHE.out = JSON.stringify(cur, null, 2);
+        out.value = GEN_CACHE.out;
+        status.textContent = "\u5F53\u524D\u5DF2\u4FDD\u5B58\u62A4\u680F\uFF1A\u8EAB\u4EFD" + (cur.identity || []).length + " / \u8BED\u6C14" + (cur.voice || []).length + " / \u7981\u6B62" + (cur.forbidden || []).length + " / \u6F02\u79FB" + (cur.drift_rules || []).length;
+        status.className = "pe-note pe-ok";
+      }
+    } catch (e) {
+    }
+    genBtn.addEventListener("click", () => {
+      const text = (src.value || "").trim();
+      if (!text) {
+        status.className = "pe-note pe-warn";
+        status.textContent = "\u8BF7\u5148\u7C98\u8D34\u89D2\u8272\u4EBA\u8BBE\u539F\u6587\u3002";
+        return;
+      }
+      genBtn.disabled = true;
+      const prev = genBtn.textContent;
+      genBtn.textContent = "\u751F\u6210\u4E2D\u2026";
+      status.className = "pe-note";
+      status.textContent = "\u6B63\u5728\u8C03\u7528 " + (sel.value || "\u4E3B API") + " \u8F6C\u6362\u2026";
+      Promise.resolve().then(() => deps.generateGuard(text, { api: sel.value })).then((res) => {
+        if (res && res.ok) {
+          GEN_CACHE.out = JSON.stringify(res.guard, null, 2);
+          out.value = GEN_CACHE.out;
+          status.className = "pe-note pe-ok";
+          status.textContent = "\u751F\u6210\u6210\u529F\uFF08" + (res.api || sel.value) + "\uFF09\u3002\u8BF7\u5BA1\u6821\u540E\u70B9\u4FDD\u5B58\u3002";
+        } else {
+          status.className = "pe-note pe-bad";
+          status.textContent = "\u751F\u6210\u5931\u8D25\uFF1A" + (res && res.error || "\u672A\u77E5\u9519\u8BEF");
+        }
+      }).catch((e) => {
+        status.className = "pe-note pe-bad";
+        status.textContent = "\u751F\u6210\u5F02\u5E38\uFF1A" + (e && e.message);
+      }).then(() => {
+        genBtn.disabled = false;
+        genBtn.textContent = prev;
+      });
+    });
+    saveBtn.addEventListener("click", () => {
+      const raw = (out.value || "").trim();
+      if (!raw) {
+        status.className = "pe-note pe-warn";
+        status.textContent = "\u9884\u89C8\u4E3A\u7A7A\uFF0C\u5148\u300C\u751F\u6210\u62A4\u680F\u300D\u6216\u624B\u52A8\u586B\u5165 JSON\u3002";
+        return;
+      }
+      let obj = null;
+      try {
+        obj = JSON.parse(raw);
+      } catch (e) {
+        status.className = "pe-note pe-bad";
+        status.textContent = "JSON \u89E3\u6790\u5931\u8D25\uFF1A" + (e && e.message);
+        return;
+      }
+      try {
+        const ok = deps.saveGuard ? deps.saveGuard(obj, { source: src.value, api: sel.value }) : false;
+        if (ok) {
+          status.className = "pe-note pe-ok";
+          status.textContent = "\u5DF2\u4FDD\u5B58\uFF08" + (sel.value || "\u4E3B API") + " \u751F\u6210\uFF09\u3002\u62A4\u680F\u5DF2\u5373\u65F6\u751F\u6548\u3002";
+        } else {
+          status.className = "pe-note pe-bad";
+          status.textContent = "\u4FDD\u5B58\u5931\u8D25\uFF1A\u5199\u5165\u6269\u5C55\u53D8\u91CF\u8FD4\u56DE false\u3002";
+        }
+      } catch (e) {
+        status.className = "pe-note pe-bad";
+        status.textContent = "\u4FDD\u5B58\u5F02\u5E38\uFF1A" + (e && e.message);
+      }
+    });
+    clearBtn.addEventListener("click", () => {
+      try {
+        if (deps.saveGuard) deps.saveGuard({ identity: [], voice: [], forbidden: [], drift_rules: [] }, { source: "", api: "" });
+        GEN_CACHE.out = "";
+        out.value = "";
+        status.className = "pe-note pe-ok";
+        status.textContent = "\u62A4\u680F\u5185\u5BB9\u5DF2\u6E05\u7A7A\uFF08\u5F00\u5173\u4ECD\u4FDD\u6301\u539F\u72B6\u6001\uFF09\u3002";
+      } catch (e) {
+        status.className = "pe-note pe-bad";
+        status.textContent = "\u6E05\u7A7A\u5931\u8D25\uFF1A" + (e && e.message);
+      }
+    });
+    root.appendChild(box);
+  } catch (e) {
+    log("\u6E32\u67D3\u62A4\u680F\u751F\u6210\u5668\u5931\u8D25\uFF08\u4E0D\u5F71\u54CD\u5F15\u64CE\uFF09", e && e.message);
   }
 }
 function renderPanel(root, deps) {
@@ -1216,6 +1463,7 @@ function renderPanel(root, deps) {
   root.appendChild(viaRow);
   renderPersona(root, deps);
   renderGuard(root, deps);
+  renderGuardGen(root, Object.assign({}, deps, { rerender: () => renderPanel(root, deps) }));
   const btns = document.createElement("div");
   btns.className = "pe-btns";
   const mkBtn = (label, fn) => {
@@ -1294,12 +1542,184 @@ function mountPanelWithRetry(deps = {}, tries = 5, delayMs = 1200) {
   }, delayMs);
 }
 
-// src/integration.js
+// src/guardgen.js
 var LOGTAG2 = "[\u4EBA\u683C\u5F15\u64CE]";
-var PROMPT_ID = "persona_engine_inject";
 function log2(...a) {
   try {
     console.log.apply(console, [LOGTAG2].concat([].slice.call(a)));
+  } catch (e) {
+  }
+}
+function TH() {
+  try {
+    if (typeof window !== "undefined" && window.TavernHelper) return window.TavernHelper;
+  } catch (e) {
+  }
+  try {
+    if (typeof globalThis !== "undefined" && globalThis.TavernHelper) return globalThis.TavernHelper;
+  } catch (e) {
+  }
+  return null;
+}
+function canGenerate() {
+  const t = TH();
+  return !!(t && (typeof t.generateRaw === "function" || typeof t.generate === "function"));
+}
+function listApiOptions() {
+  const out = ["\u9ED8\u8BA4\uFF08\u4E3B API\uFF09"];
+  try {
+    const t = TH();
+    if (t && typeof t.getProxyPresetNames === "function") {
+      const names = t.getProxyPresetNames() || [];
+      for (const n of names) {
+        const s = String(n || "").trim();
+        if (!s || s === "None") continue;
+        if (out.indexOf(s) < 0) out.push(s);
+      }
+    }
+  } catch (e) {
+    log2("\u8BFB\u53D6\u4EE3\u7406\u9884\u8BBE\u5931\u8D25", e && e.message);
+  }
+  return out;
+}
+function buildPrompt(sourceText, charName2) {
+  const who = charName2 ? charName2 : "\u89D2\u8272";
+  return [
+    "\u4F60\u662F\u4E00\u4E2A\u300C\u89D2\u8272\u4EBA\u8BBE\u7ED3\u6784\u5316\u300D\u5DE5\u5177\u3002\u4EFB\u52A1\uFF1A\u628A\u4E0B\u9762\u8FD9\u6BB5\u89D2\u8272\u4EBA\u8BBE\u539F\u6587\uFF0C\u8F6C\u5199\u6210\u4E00\u4EFD**\u7ED3\u6784\u5316\u62A4\u680F JSON**\u3002",
+    "",
+    "\u62A4\u680F\u7684\u7528\u9014\uFF1A\u5728\u89D2\u8272\u626E\u6F14\u5BF9\u8BDD\u751F\u6210\u4E4B\u524D\uFF0C\u628A\u300C\u8FD9\u4E2A\u89D2\u8272\u65E0\u8BBA\u5982\u4F55\u90FD\u4E0D\u80FD\u8FDD\u80CC\u7684\u4E1C\u897F\u300D\u786C\u585E\u7ED9\u6A21\u578B\uFF0C\u9632\u6B62\u5B83\u4E3A\u987A\u7740\u5267\u60C5\u628A\u4EBA\u8BBE\u5199\u5D29\u3002",
+    "",
+    "\u8BF7\u4E25\u683C\u9075\u5B88\u4EE5\u4E0B\u89C4\u5219\uFF1A",
+    "1. \u53EA\u8F93\u51FA\u4E00\u4E2A JSON \u5BF9\u8C61\uFF0C\u4E0D\u8981\u4EFB\u4F55\u89E3\u91CA\u3001\u4E0D\u8981 markdown \u4EE3\u7801\u56F4\u680F\u3001\u4E0D\u8981\u5728 JSON \u524D\u540E\u52A0\u5B57\u3002",
+    "2. JSON \u7684\u9876\u5C42\u952E\u56FA\u5B9A\u4E3A\uFF1Aidentity, voice, forbidden, drift_rules\u3002",
+    "3. identity\uFF1A\u4E0D\u53EF\u6539\u7684\u8EAB\u4EFD\u4E8B\u5B9E\uFF08\u5E74\u9F84\u3001\u8EAB\u4EFD\u3001\u6765\u5386\u3001\u5173\u952E\u7ECF\u5386\u3001\u5173\u7CFB\u8BBE\u5B9A\u7B49\uFF09\u3002\u5B57\u7B26\u4E32\u6570\u7EC4\uFF0C0~6 \u6761\u3002",
+    "4. voice\uFF1A\u8BED\u6C14/\u8BF4\u8BDD\u65B9\u5F0F\u7684\u5951\u7EA6\uFF08\u53E5\u5B50\u957F\u77ED\u3001\u7528\u8BCD\u4E60\u60EF\u3001\u53E3\u7656\u3001\u60C5\u7EEA\u8868\u8FBE\u65B9\u5F0F\u7B49\uFF09\u3002\u5B57\u7B26\u4E32\u6570\u7EC4\uFF0C0~6 \u6761\u3002",
+    "5. forbidden\uFF1A\u7EDD\u5BF9\u4E0D\u80FD\u505A\u7684\u4E8B\uFF08\u4E0D\u8BB8 OOC \u7684\u884C\u4E3A\u3001\u4E0D\u8BB8\u8BF4\u7684\u53F0\u8BCD\u3001\u4E0D\u8BB8\u5D29\u7684\u5E95\u7EBF\uFF09\u3002\u5B57\u7B26\u4E32\u6570\u7EC4\uFF0C0~6 \u6761\u3002",
+    '6. drift_rules\uFF1A\u72B6\u6001\u89E6\u53D1\u5F0F\u7EA0\u504F\u3002\u6570\u7EC4\uFF0C\u5143\u7D20\u5F62\u5982 {"when":"\u6761\u4EF6","then":"\u505A\u6CD5"}\u3002',
+    "   - when \u5FC5\u987B\u7528\u4E0B\u9762\u8FD9\u5957\u300C\u77ED\u952E\u6BD4\u8F83\u5F0F\u300D\uFF0C\u4E0D\u8981\u5199\u4E2D\u6587\u53E5\u5B50\uFF1A",
+    "     v \u5FC3\u60C5 / a \u5F20\u529B / s \u5B89\u5168\u611F / u \u4E0D\u786E\u5B9A / c \u4FE1\u4EFB / ct \u4EB2\u8FD1 / bc \u8FB9\u754C\u8212\u9002",
+    '     \u4F8B\uFF1A"s < 0.30"\u3001"a > 0.70"\u3001"c > 0.60"\u3002\u6BCF\u4E2A\u952E\u7684\u503C\u57DF\u662F 0~1\u3002',
+    "   - \u53EA\u5728\u4EBA\u8BBE\u539F\u6587\u91CC\u80FD\u660E\u786E\u63A8\u51FA\u300C\u67D0\u79CD\u72B6\u6001\u4E0B\u8BE5\u600E\u4E48\u7EA0\u504F\u300D\u65F6\u624D\u5199\uFF0C0~4 \u6761\uFF1B\u4E0D\u786E\u5B9A\u5C31\u7559\u7A7A\u6570\u7EC4\u3002",
+    "7. \u6BCF\u6761\u90FD\u5199\u6210**\u5173\u4E8E" + who + "\u7684\u5177\u4F53\u7EA6\u675F**\uFF0C\u4E0D\u8981\u5199\u6CDB\u6CDB\u7684\u300C\u4FDD\u6301\u89D2\u8272\u300D\u300C\u4E0D\u8981 OOC\u300D\u8FD9\u7C7B\u5E9F\u8BDD\u3002",
+    "8. \u4EBA\u8BBE\u539F\u6587\u91CC\u6CA1\u63D0\u5230\u7684\uFF0C\u4E0D\u8981\u81EA\u5DF1\u7F16\uFF1B\u5B81\u7F3A\u6BCB\u6EE5\u3002",
+    "9. \u6240\u6709\u5B57\u7B26\u4E32\u5185\u4E0D\u8981\u51FA\u73B0 {{char}} \u4E4B\u5916\u7684\u82B1\u62EC\u53F7\u6A21\u677F\u8BED\u6CD5\uFF1B\u4E0D\u8981\u4F7F\u7528\u6362\u884C\u7B26\u3002",
+    "",
+    "\u793A\u4F8B\u8F93\u51FA\uFF1A",
+    '{"identity":["17 \u5C81\uFF0C\u9AD8\u4E8C\u5B66\u751F","\u5E7C\u65F6\u5728\u65E7\u57CE\u533A\u957F\u5927"],"voice":["\u53E5\u5B50\u77ED\uFF0C\u5F88\u5C11\u7528\u611F\u53F9\u53F7","\u4E0D\u4E3B\u52A8\u89E3\u91CA\u81EA\u5DF1\u7684\u52A8\u673A"],"forbidden":["\u4E0D\u628A\u75DB\u82E6\u5F53\u4F5C\u6362\u53D6\u540C\u60C5\u7684\u7B79\u7801","\u4E0D\u4F1A\u7A81\u7136\u53D8\u5F97\u70ED\u60C5\u5065\u8C08"],"drift_rules":[{"when":"s < 0.30","then":"\u5148\u9000\u534A\u6B65\uFF0C\u4E0D\u4E3B\u52A8\u8D34\u8FD1"},{"when":"a > 0.70","then":"\u653E\u6162\u8BED\u901F\uFF0C\u5148\u786E\u8BA4\u5BF9\u65B9\u610F\u56FE"}]}',
+    "",
+    "=== \u89D2\u8272\u4EBA\u8BBE\u539F\u6587\u5F00\u59CB ===",
+    String(sourceText || "").trim(),
+    "=== \u89D2\u8272\u4EBA\u8BBE\u539F\u6587\u7ED3\u675F ==="
+  ].join("\n");
+}
+function parseGuardJson(text) {
+  let s = String(text == null ? "" : text).trim();
+  if (!s) return null;
+  const fence = s.match(/```(?:json)?\s*([\s\S]*?)```/i);
+  if (fence && fence[1]) s = fence[1].trim();
+  try {
+    return JSON.parse(s);
+  } catch (e) {
+  }
+  const a = s.indexOf("{");
+  const b = s.lastIndexOf("}");
+  if (a >= 0 && b > a) {
+    try {
+      return JSON.parse(s.slice(a, b + 1));
+    } catch (e) {
+    }
+  }
+  return null;
+}
+function normalizeGuard(obj) {
+  const arr = (v, max, maxLen) => (Array.isArray(v) ? v : []).map((x) => typeof x === "string" ? x : x == null ? "" : String(x)).map((x) => x.replace(/[\r\n]+/g, " ").trim()).filter(Boolean).slice(0, max).map((x) => x.length > maxLen ? x.slice(0, maxLen) : x);
+  const out = {
+    identity: arr(obj && obj.identity, 8, 120),
+    voice: arr(obj && obj.voice, 8, 120),
+    forbidden: arr(obj && obj.forbidden, 8, 120),
+    drift_rules: []
+  };
+  const rules = Array.isArray(obj && obj.drift_rules) ? obj.drift_rules : [];
+  for (const r of rules) {
+    if (!r) continue;
+    let when = typeof r.when === "string" ? r.when : "";
+    let then = typeof r.then === "string" ? r.then : "";
+    when = when.replace(/[\r\n]+/g, " ").trim();
+    then = then.replace(/[\r\n]+/g, " ").trim();
+    if (!when || !then) continue;
+    if (!/^\s*(v|a|s|u|c|ct|bc)\s*(<=|>=|<|>|==|!=)\s*[0-9.]+/.test(when)) continue;
+    out.drift_rules.push({ when, then: then.slice(0, 120) });
+    if (out.drift_rules.length >= 6) break;
+  }
+  return out;
+}
+async function generateGuard(sourceText, opts = {}) {
+  const source = String(sourceText || "").trim();
+  if (!source) return { ok: false, error: "\u4EBA\u8BBE\u539F\u6587\u4E3A\u7A7A\uFF0C\u5148\u7C98\u8D34\u5185\u5BB9\u518D\u751F\u6210" };
+  const t = TH();
+  const gen = t && (typeof t.generateRaw === "function" ? t.generateRaw : typeof t.generate === "function" ? t.generate : null);
+  if (!gen) {
+    return { ok: false, error: "\u9152\u9986\u52A9\u624B\u672A\u5C31\u7EEA\uFF1A\u627E\u4E0D\u5230 generateRaw / generate\uFF08\u9700 JS-Slash-Runner\uFF09" };
+  }
+  const api = String(opts.api || "").trim();
+  const usePreset = api && api !== "\u9ED8\u8BA4\uFF08\u4E3B API\uFF09" && api !== "\u9ED8\u8BA4";
+  const custom_api = {};
+  if (usePreset) custom_api.proxy_preset = api;
+  if (opts.model) custom_api.model = String(opts.model).trim();
+  const config = {
+    user_input: buildPrompt(source, opts.charName),
+    should_silence: true,
+    // 后台静默生成，不干扰当前对话流
+    max_chat_history: 0,
+    // 纯转换任务，不需要任何聊天上下文
+    ordered_prompts: ["user_input"]
+    // 只送这一条，避免带入酒馆预设/世界书
+  };
+  if (Object.keys(custom_api).length) config.custom_api = custom_api;
+  config.json_schema = {
+    name: "persona_guard",
+    strict: false,
+    value: {
+      type: "object",
+      properties: {
+        identity: { type: "array", items: { type: "string" } },
+        voice: { type: "array", items: { type: "string" } },
+        forbidden: { type: "array", items: { type: "string" } },
+        drift_rules: {
+          type: "array",
+          items: {
+            type: "object",
+            properties: { when: { type: "string" }, then: { type: "string" } },
+            required: ["when", "then"]
+          }
+        }
+      },
+      required: ["identity", "voice", "forbidden", "drift_rules"]
+    }
+  };
+  try {
+    log2("\u62A4\u680F\u751F\u6210\u4E2D\u2026", "api=" + (usePreset ? api : "(\u4E3B API)"), "len=" + source.length);
+    const raw = await gen(config);
+    const text = typeof raw === "string" ? raw : raw && raw.text ? raw.text : String(raw == null ? "" : raw);
+    const parsed = parseGuardJson(text);
+    if (!parsed || typeof parsed !== "object") {
+      return { ok: false, raw: text, error: "\u6A21\u578B\u8FD4\u56DE\u7684\u4E0D\u662F\u5408\u6CD5 JSON\uFF0C\u53EF\u70B9\u300C\u91CD\u8BD5\u300D\u6216\u6362\u4E2A API" };
+    }
+    const guard = normalizeGuard(parsed);
+    const total = guard.identity.length + guard.voice.length + guard.forbidden.length + guard.drift_rules.length;
+    if (!total) return { ok: false, raw: text, error: "\u6A21\u578B\u6CA1\u62BD\u51FA\u4EFB\u4F55\u6709\u6548\u6761\u76EE\uFF0C\u4EBA\u8BBE\u539F\u6587\u53EF\u80FD\u592A\u77ED\u6216\u592A\u62BD\u8C61" };
+    return { ok: true, guard, raw: text };
+  } catch (e) {
+    return { ok: false, error: "\u751F\u6210\u5931\u8D25\uFF1A" + (e && e.message || e) };
+  }
+}
+
+// src/integration.js
+var LOGTAG3 = "[\u4EBA\u683C\u5F15\u64CE]";
+var PROMPT_ID = "persona_engine_inject";
+function log3(...a) {
+  try {
+    console.log.apply(console, [LOGTAG3].concat([].slice.call(a)));
   } catch (e) {
   }
 }
@@ -1307,9 +1727,9 @@ function toast(msg, title) {
   try {
     if (typeof toastr !== "undefined") {
       toastr.info(String(msg), String(title || "\u4EBA\u683C\u5F15\u64CE"), { timeOut: 2200 });
-    } else log2(msg);
+    } else log3(msg);
   } catch (e) {
-    log2(msg);
+    log3(msg);
   }
 }
 function getCtx() {
@@ -1355,7 +1775,7 @@ function getProfile(force) {
   try {
     cachedProfile = resolveProfile({});
   } catch (e) {
-    log2("\u89E3\u6790 profile \u5931\u8D25\uFF0C\u9000\u56DE\u5185\u7F6E\u9ED8\u8BA4", e && e.message);
+    log3("\u89E3\u6790 profile \u5931\u8D25\uFF0C\u9000\u56DE\u5185\u7F6E\u9ED8\u8BA4", e && e.message);
     cachedProfile = null;
   }
   return cachedProfile;
@@ -1376,8 +1796,8 @@ function setHealth(key, kind, note) {
   HEALTH[key] = { kind, note: note || "", at: Date.now() };
 }
 function probeRuntime() {
-  const TH = typeof window !== "undefined" && window.TavernHelper || globalThis && globalThis.TavernHelper || null;
-  if (TH && typeof TH.injectPrompts === "function") {
+  const TH2 = typeof window !== "undefined" && window.TavernHelper || globalThis && globalThis.TavernHelper || null;
+  if (TH2 && typeof TH2.injectPrompts === "function") {
     setHealth("inject", "ok", "TavernHelper.injectPrompts @ \u9152\u9986\u52A9\u624B");
   } else if (typeof injectPrompts === "function") {
     setHealth("inject", "ok", "injectPrompts @ \u811A\u672C\u4F5C\u7528\u57DF");
@@ -1392,18 +1812,18 @@ function probeRuntime() {
   } else {
     setHealth("inject", "missing", "injectPrompts \u4E0E SillyTavern \u5747\u4E0D\u53EF\u7528");
   }
-  if (TH && typeof TH.eventOn === "function") setHealth("events", "ok", "TavernHelper.eventOn @ \u9152\u9986\u52A9\u624B");
+  if (TH2 && typeof TH2.eventOn === "function") setHealth("events", "ok", "TavernHelper.eventOn @ \u9152\u9986\u52A9\u624B");
   else if (typeof eventOn === "function") setHealth("events", "ok", "eventOn @ \u811A\u672C\u4F5C\u7528\u57DF");
   else if (typeof eventSource !== "undefined" && eventSource || getCtx() && getCtx().eventSource) setHealth("events", "ok", "eventSource.on @ ST");
   else setHealth("events", "missing", "\u672A\u627E\u5230\u4E8B\u4EF6\u6E90");
-  if (TH && typeof TH.registerMacroLike === "function") setHealth("macros", "ok", "TavernHelper.registerMacroLike @ \u9152\u9986\u52A9\u624B");
+  if (TH2 && typeof TH2.registerMacroLike === "function") setHealth("macros", "ok", "TavernHelper.registerMacroLike @ \u9152\u9986\u52A9\u624B");
   else if (typeof registerMacroLike === "function") setHealth("macros", "ok", "registerMacroLike @ \u811A\u672C\u4F5C\u7528\u57DF");
   else setHealth("macros", "missing", "\u7F3A\u5C11 registerMacroLike\uFF08\u9700\u9152\u9986\u52A9\u624B\uFF09");
   const _c = getCtx();
   const _p = _c && _c.SlashCommandParser || typeof SillyTavern !== "undefined" && SillyTavern.SlashCommandParser;
   if (_p && typeof _p.addCommandObject === "function") setHealth("commands", "ok", "SlashCommandParser @ ST");
   else setHealth("commands", "missing", "\u7F3A\u5C11 SlashCommandParser");
-  const _hasVars = TH && (typeof TH.getVariables === "function" || typeof TH.insertOrAssignVariables === "function");
+  const _hasVars = TH2 && (typeof TH2.getVariables === "function" || typeof TH2.insertOrAssignVariables === "function");
   if (_hasVars) setHealth("vars", "ok", "TavernHelper \u53D8\u91CF\u63A5\u53E3 @ \u9152\u9986\u52A9\u624B");
   else if (globalThis.TavernHelper && typeof globalThis.TavernHelper.getVariables === "function") setHealth("vars", "ok", "globalThis.TavernHelper.getVariables");
   else setHealth("vars", "missing", "\u7F3A\u5C11 TavernHelper\uFF08\u53D8\u91CF\u65E0\u6CD5\u6301\u4E45\u5316\uFF09");
@@ -1488,7 +1908,7 @@ function selfCheck(silent) {
     via: lastInjectVia || "",
     summary: fails === 0 && warns === 0 ? "\u5168\u90E8\u901A\u8FC7" : fails ? fails + " \u9879\u5F02\u5E38" : warns + " \u9879\u964D\u7EA7"
   };
-  if (!silent) log2("\u5185\u90E8\u81EA\u68C0", lastSelfCheck.summary, lastSelfCheck.durationMs + "ms");
+  if (!silent) log3("\u5185\u90E8\u81EA\u68C0", lastSelfCheck.summary, lastSelfCheck.durationMs + "ms");
   return lastSelfCheck;
 }
 function selfCheckLine(force) {
@@ -1568,9 +1988,9 @@ function doInject(reason) {
     const content = e.inject();
     const depth = p.inject && p.inject.depth || 4;
     const role = p.inject && p.inject.role || "system";
-    const TH = typeof window !== "undefined" && window.TavernHelper || globalThis && globalThis.TavernHelper || null;
-    const _inject = TH && typeof TH.injectPrompts === "function" && TH.injectPrompts || (typeof injectPrompts === "function" ? injectPrompts : null);
-    const _uninject = TH && typeof TH.uninjectPrompts === "function" && TH.uninjectPrompts || (typeof uninjectPrompts === "function" ? uninjectPrompts : null);
+    const TH2 = typeof window !== "undefined" && window.TavernHelper || globalThis && globalThis.TavernHelper || null;
+    const _inject = TH2 && typeof TH2.injectPrompts === "function" && TH2.injectPrompts || (typeof injectPrompts === "function" ? injectPrompts : null);
+    const _uninject = TH2 && typeof TH2.uninjectPrompts === "function" && TH2.uninjectPrompts || (typeof uninjectPrompts === "function" ? uninjectPrompts : null);
     if (typeof _inject === "function") {
       if (injected && typeof _uninject === "function") {
         try {
@@ -1582,31 +2002,31 @@ function doInject(reason) {
         [{ id: PROMPT_ID, position: "in_chat", depth, role, content, should_scan: true }],
         { once: false }
       );
-      if (TH && typeof TH.injectPrompts === "function") HEALTH.inject = { kind: "ok", note: "TavernHelper.injectPrompts @ \u9152\u9986\u52A9\u624B" };
+      if (TH2 && typeof TH2.injectPrompts === "function") HEALTH.inject = { kind: "ok", note: "TavernHelper.injectPrompts @ \u9152\u9986\u52A9\u624B" };
       injected = true;
       lastInjectVia = "tavernhelper";
-      log2("\u5DF2\u6CE8\u5165" + (reason ? "(" + reason + ")" : ""), content.length + "\u5B57", "[\u9152\u9986\u52A9\u624B]");
+      log3("\u5DF2\u6CE8\u5165" + (reason ? "(" + reason + ")" : ""), content.length + "\u5B57", "[\u9152\u9986\u52A9\u624B]");
       return;
     }
     if (injectViaNative(content, depth)) {
       injected = true;
       if (HEALTH.inject) HEALTH.inject.kind = "fallback";
       lastInjectVia = "native";
-      log2("\u5DF2\u6CE8\u5165" + (reason ? "(" + reason + ")" : ""), content.length + "\u5B57", "[ST\u539F\u751F\u515C\u5E95]");
+      log3("\u5DF2\u6CE8\u5165" + (reason ? "(" + reason + ")" : ""), content.length + "\u5B57", "[ST\u539F\u751F\u515C\u5E95]");
       return;
     }
     if (HEALTH.inject) HEALTH.inject.kind = "missing";
     lastInjectVia = "";
-    log2("\u6CE8\u5165\u4E0D\u53EF\u7528\uFF0C\u8DF3\u8FC7\uFF08\u9152\u9986\u52A9\u624B\u4E0E ST \u539F\u751F\u901A\u9053\u5747\u7F3A\u5931\uFF09");
+    log3("\u6CE8\u5165\u4E0D\u53EF\u7528\uFF0C\u8DF3\u8FC7\uFF08\u9152\u9986\u52A9\u624B\u4E0E ST \u539F\u751F\u901A\u9053\u5747\u7F3A\u5931\uFF09");
   } catch (e) {
-    log2("\u6CE8\u5165\u5931\u8D25", e && e.message);
+    log3("\u6CE8\u5165\u5931\u8D25", e && e.message);
   }
 }
 function onEvent(name, fn) {
   try {
-    const TH = typeof window !== "undefined" && window.TavernHelper || globalThis && globalThis.TavernHelper || null;
-    if (TH && typeof TH.eventOn === "function") {
-      TH.eventOn(name, fn);
+    const TH2 = typeof window !== "undefined" && window.TavernHelper || globalThis && globalThis.TavernHelper || null;
+    if (TH2 && typeof TH2.eventOn === "function") {
+      TH2.eventOn(name, fn);
       return true;
     }
     if (typeof eventOn === "function") {
@@ -1619,7 +2039,7 @@ function onEvent(name, fn) {
       return true;
     }
   } catch (e) {
-    log2("\u7ED1\u5B9A\u4E8B\u4EF6\u5931\u8D25 " + name, e && e.message);
+    log3("\u7ED1\u5B9A\u4E8B\u4EF6\u5931\u8D25 " + name, e && e.message);
   }
   return false;
 }
@@ -1661,7 +2081,7 @@ function onMsg(id, type) {
     const p = e.profile || {};
     if (p.toast_on_evolve) toast(p.meta && p.meta.name || "\u4EBA\u683C \xB7 " + e.mood());
   } catch (e) {
-    log2("evolve \u5931\u8D25", e && e.stack || e && e.message);
+    log3("evolve \u5931\u8D25", e && e.stack || e && e.message);
   }
 }
 var lastPush = "";
@@ -1695,7 +2115,7 @@ function pushState(force) {
       return true;
     }
   } catch (e) {
-    log2("\u56DE\u5199\u72B6\u6001\u5931\u8D25", e && e.message);
+    log3("\u56DE\u5199\u72B6\u6001\u5931\u8D25", e && e.message);
   }
   return false;
 }
@@ -1729,11 +2149,11 @@ function registerMacros() {
         ok = true;
       }
     } catch (e) {
-      log2("\u6CE8\u518C\u5B8F\u5931\u8D25 " + key, e && e.message);
+      log3("\u6CE8\u518C\u5B8F\u5931\u8D25 " + key, e && e.message);
     }
     if (ok) registered.push(key);
   }
-  if (registered.length) log2("\u5DF2\u6CE8\u518C\u52A9\u624B\u5B8F", registered.join(","));
+  if (registered.length) log3("\u5DF2\u6CE8\u518C\u52A9\u624B\u5B8F", registered.join(","));
 }
 var FOOT = "\u4EBA\u683C\u5F15\u64CE";
 var CMDS = [
@@ -1765,7 +2185,7 @@ function registerCommands() {
   const SC = ctx && ctx.SlashCommand || typeof SillyTavern !== "undefined" && SillyTavern.SlashCommand;
   const Arg = ctx && ctx.SlashCommandArgument || typeof SillyTavern !== "undefined" && SillyTavern.SlashCommandArgument;
   if (!Parser || !SC || typeof Parser.addCommandObject !== "function") {
-    log2("SlashCommandParser \u4E0D\u53EF\u7528\uFF0C\u8DF3\u8FC7\u659C\u6760\u547D\u4EE4\u6CE8\u518C");
+    log3("SlashCommandParser \u4E0D\u53EF\u7528\uFF0C\u8DF3\u8FC7\u659C\u6760\u547D\u4EE4\u6CE8\u518C");
     return;
   }
   for (const c of CMDS) {
@@ -1781,7 +2201,7 @@ function registerCommands() {
             const out = run(getEngine());
             return out === void 0 || out === null ? "" : String(out);
           } catch (e) {
-            log2("\u659C\u6760 " + key + " \u51FA\u9519", e && e.message);
+            log3("\u659C\u6760 " + key + " \u51FA\u9519", e && e.message);
             return "";
           }
         }
@@ -1789,10 +2209,10 @@ function registerCommands() {
       if (Arg && Arg.fromProps) props.returns = Arg.fromProps({ description: desc, type: "string" });
       Parser.addCommandObject(SC.fromProps(props));
     } catch (e) {
-      log2("\u6CE8\u518C\u659C\u6760 " + key + " \u5931\u8D25", e && e.message);
+      log3("\u6CE8\u518C\u659C\u6760 " + key + " \u5931\u8D25", e && e.message);
     }
   }
-  log2("\u5DF2\u6CE8\u518C\u659C\u6760\u547D\u4EE4", CMDS.map((c) => "/" + c[0]).join(" "));
+  log3("\u5DF2\u6CE8\u518C\u659C\u6760\u547D\u4EE4", CMDS.map((c) => "/" + c[0]).join(" "));
 }
 function exposeApi() {
   try {
@@ -1827,6 +2247,27 @@ function exposeApi() {
       selfCheckLine: (force) => selfCheckLine(force),
       // 人格快照：直接读实时七维 + 情绪 + 倾向 + 目标，并给出与上一次的差值
       snapshot: () => personaSnapshot(),
+      // 人设护栏生成器：Console 里 personaEngine.guardGen.list()/can()/save(obj)/on(true|false)/raw()
+      guardGen: {
+        can: () => {
+          try {
+            return canGenerate ? canGenerate() : false;
+          } catch (e) {
+            return false;
+          }
+        },
+        list: () => {
+          try {
+            return listApiOptions && listApiOptions() || [];
+          } catch (e) {
+            return [];
+          }
+        },
+        gen: (text, opts) => generateGuard(text, opts),
+        save: (obj, meta) => saveGuard(obj, meta),
+        on: (v) => setGuardOn(v),
+        raw: () => guardRaw()
+      },
       EXTENSION_ID,
       CARD_OVERRIDE_KEY,
       version: ENGINE_VERSION,
@@ -1844,17 +2285,99 @@ function exposeApi() {
         guardOn: () => {
           const g = getEngine().profile.persona_guard;
           return !!(g && g.enabled === true);
-        }
+        },
+        ...guardGenDeps()
       })
     };
   } catch (e) {
-    log2("\u5BFC\u51FA API \u5931\u8D25", e && e.message);
+    log3("\u5BFC\u51FA API \u5931\u8D25", e && e.message);
   }
+}
+function guardRaw() {
+  try {
+    const st = getExtensionState ? getExtensionState() : null;
+    if (st && st.persona_guard && typeof st.persona_guard === "object") {
+      return JSON.parse(JSON.stringify(st.persona_guard));
+    }
+  } catch (e) {
+  }
+  try {
+    const g = getEngine().profile && getEngine().profile.persona_guard;
+    if (g) return JSON.parse(JSON.stringify(g));
+  } catch (e) {
+  }
+  return null;
+}
+function saveGuard(obj, meta) {
+  try {
+    if (!obj || typeof obj !== "object") return false;
+    const cur = guardRaw() || {};
+    const next = Object.assign({}, cur, {
+      identity: Array.isArray(obj.identity) ? obj.identity : [],
+      voice: Array.isArray(obj.voice) ? obj.voice : [],
+      forbidden: Array.isArray(obj.forbidden) ? obj.forbidden : [],
+      drift_rules: Array.isArray(obj.drift_rules) ? obj.drift_rules : [],
+      gen: {
+        source: meta && meta.source || "",
+        api: meta && meta.api || "",
+        model: "",
+        at: Date.now()
+      }
+    });
+    if (typeof next.enabled !== "boolean") next.enabled = true;
+    const ok = updateExtensionState ? updateExtensionState((prev) => Object.assign({}, prev, { persona_guard: next })) : false;
+    try {
+      getEngine(true);
+      doInject("\u62A4\u680F\u5DF2\u66F4\u65B0");
+    } catch (e) {
+    }
+    return ok !== false;
+  } catch (e) {
+    log3("\u4FDD\u5B58\u62A4\u680F\u5931\u8D25", e && e.message);
+    return false;
+  }
+}
+function setGuardOn(on) {
+  try {
+    const next = Object.assign({}, guardRaw() || {}, { enabled: on === true });
+    const ok = updateExtensionState ? updateExtensionState((prev) => Object.assign({}, prev, { persona_guard: next })) : false;
+    try {
+      getEngine(true);
+      doInject(on ? "\u62A4\u680F\u5F00\u542F" : "\u62A4\u680F\u5173\u95ED");
+    } catch (e) {
+    }
+    return ok !== false;
+  } catch (e) {
+    log3("\u5207\u6362\u62A4\u680F\u5F00\u5173\u5931\u8D25", e && e.message);
+    return false;
+  }
+}
+function guardGenDeps() {
+  return {
+    canGenerate: () => {
+      try {
+        return canGenerate ? canGenerate() : false;
+      } catch (e) {
+        return false;
+      }
+    },
+    listApiOptions: () => {
+      try {
+        return listApiOptions && listApiOptions() || [];
+      } catch (e) {
+        return [];
+      }
+    },
+    generateGuard: (text, opts) => generateGuard(text, opts),
+    saveGuard,
+    setGuardOn,
+    guardRaw
+  };
 }
 function init() {
   const root = typeof window !== "undefined" ? window : typeof globalThis !== "undefined" ? globalThis : {};
   if (root.__persona_engine_booted) {
-    log2("\u5DF2\u542F\u52A8\uFF0C\u8DF3\u8FC7\u91CD\u590D\u521D\u59CB\u5316");
+    log3("\u5DF2\u542F\u52A8\uFF0C\u8DF3\u8FC7\u91CD\u590D\u521D\u59CB\u5316");
     return;
   }
   root.__persona_engine_booted = true;
@@ -1867,7 +2390,7 @@ function init() {
       getEngine(true);
       doInject("\u5207\u6362\u804A\u5929");
     } catch (e) {
-      log2("\u5207\u6362\u804A\u5929\u91CD\u6CE8\u5165\u5931\u8D25", e && e.message);
+      log3("\u5207\u6362\u804A\u5929\u91CD\u6CE8\u5165\u5931\u8D25", e && e.message);
     }
   };
   onEvent("chat_id_changed", onChatChange);
@@ -1889,11 +2412,11 @@ function init() {
     doInject("\u542F\u52A8");
     pushState(true);
   } catch (e) {
-    log2("\u542F\u52A8\u6CE8\u5165\u5931\u8D25", e && e.message);
+    log3("\u542F\u52A8\u6CE8\u5165\u5931\u8D25", e && e.message);
   }
   const hl = healthLine();
   toast("\u4EBA\u683C\u5F15\u64CE\u5DF2\u542F\u52A8 \xB7 " + hl, "\u4EBA\u683C\u5F15\u64CE");
-  log2("\u5065\u5EB7\u68C0\u67E5", hl, "| \u6CE8\u5165\u901A\u9053:", lastInjectVia || "(\u672A\u6CE8\u5165)");
+  log3("\u5065\u5EB7\u68C0\u67E5", hl, "| \u6CE8\u5165\u901A\u9053:", lastInjectVia || "(\u672A\u6CE8\u5165)");
   mountPanelWithRetry({
     probe: probeRuntime,
     healthLine,
@@ -1909,6 +2432,7 @@ function init() {
       const g = getEngine().profile.persona_guard;
       return !!(g && g.enabled === true);
     },
+    ...guardGenDeps(),
     refresh: () => {
       getEngine(true);
       doInject("\u9762\u677F\u91CD\u8F7D");
@@ -1928,7 +2452,7 @@ function init() {
       toast("\u72B6\u6001\u5DF2\u91CD\u7F6E", "\u4EBA\u683C\u5F15\u64CE");
     }
   });
-  log2("\u542F\u52A8\u5B8C\u6210\u3002");
+  log3("\u542F\u52A8\u5B8C\u6210\u3002");
 }
 var integration_default = { init };
 export {

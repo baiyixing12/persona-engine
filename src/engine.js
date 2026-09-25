@@ -603,7 +603,8 @@ export class PersonaEngine {
    */
   guard() {
     const G = this.profile.persona_guard;
-    if (!G || G.enabled !== true) return '';
+    // 开/关只看 enabled：只有显式 false 才关闭（默认 true）。
+    if (!G || G.enabled === false) return '';
     const L = [];
     const tctx = this.tctx;
     const list = (arr, bullet, inline) =>

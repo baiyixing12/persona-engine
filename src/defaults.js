@@ -22,7 +22,7 @@
  * 叫用户「哥哥」或提到某部作品。角色卡想改，就在卡内变量里覆盖对应 key。
  */
 
-export const ENGINE_VERSION = '0.4.0';
+export const ENGINE_VERSION = '0.5.0';
 
 /* 一个中性的小事件集。角色卡可以通过覆盖 profile.events 整体替换。 */
 export const DEFAULT_EVENTS = [
@@ -302,7 +302,9 @@ export const DEFAULT_PROFILE = {
    *   always       -- 是否总是输出 identity/voice/forbidden（drift 命中项另行追加）
    */
   persona_guard: {
-    enabled: false, // 默认关：空护栏对任何卡都是噪音，由角色卡自己打开
+    // 默认开：配合 guard() 的「空内容短路」，没内容时不会产生任何注入噪音，
+    // 因此可以安全地对所有卡默认打开；用户粘一次人设就立刻生效。
+    enabled: true,
     always: true,
     header: '【人设护栏】以下是{{char}}在任何情况下都不能违背的设定，优先级高于剧情推进的便利。\n',
     footer: '\n（若上文与此处冲突，以此处为准。）',
@@ -310,6 +312,18 @@ export const DEFAULT_PROFILE = {
     voice: [],
     forbidden: [],
     drift_rules: [],
+    /* ---------- 护栏生成器（把自然语言人设转成上面的结构化护栏） ----------
+     * source    -- 用户粘贴的人设原文（仅作留档，方便二次生成/对照）
+     * api       -- 用哪个 API 生成：'' = ST 主 API；其它 = ST「代理预设」名（副 API）
+     * model     -- 可选，覆盖模型名（留空则用所选 API 默认模型）
+     * at        -- 上次生成时间戳（0 表示从未生成过）
+     */
+    gen: {
+      source: '',
+      api: '',
+      model: '',
+      at: 0,
+    },
   },
 
   bounds: { low: 0, high: 10, initial: 5 },

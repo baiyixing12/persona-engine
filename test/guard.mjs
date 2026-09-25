@@ -12,14 +12,16 @@ const clone = (o) => JSON.parse(JSON.stringify(o));
 console.log('== G1. defaults persona_guard schema ==');
 const g0 = DEFAULT_PROFILE.persona_guard;
 ok('persona_guard defined', !!g0);
-ok('enabled default false', g0 && g0.enabled === false);
+ok('enabled default true', g0 && g0.enabled === true);
 ok('always default true', g0 && g0.always === true);
 ok('has header/footer', !!(g0 && g0.header && g0.footer));
 ok('4 arrays present', ['identity','voice','forbidden','drift_rules'].every(k => Array.isArray(g0[k])));
-
-console.log('== G2. disabled -> empty ==');
+ok('gen block present', !!(g0 && g0.gen && typeof g0.gen === 'object'));
+console.log('== G2. enabled but empty content -> empty (short-circuit) ==');
 const e1 = createEngine('t1', { profile: clone(DEFAULT_PROFILE) });
-ok('guard() is empty', e1.guard() === '');
+ok('default enabled still yields empty guard', e1.guard() === '');
+const e1off = createEngine('t1b', { profile: (() => { const p = clone(DEFAULT_PROFILE); p.persona_guard.enabled = false; return p; })() });
+ok('explicitly disabled -> empty guard', e1off.guard() === '');
 
 console.log('== G3. enabled -> content + interpolation ==');
 const prof = clone(DEFAULT_PROFILE);
